@@ -51,12 +51,31 @@ CREATE TABLE IF NOT EXISTS profiles (
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- AI Usage Logs Table
+CREATE TABLE IF NOT EXISTS ai_usage_logs (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
+  model TEXT NOT NULL,
+  task_type TEXT DEFAULT 'chat', -- 'chat', 'image_analysis', etc.
+  prompt_tokens INTEGER DEFAULT 0,
+  completion_tokens INTEGER DEFAULT 0,
+  total_tokens INTEGER DEFAULT 0,
+  has_subscription BOOLEAN DEFAULT false,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Indexes for AI usage logs
+CREATE INDEX IF NOT EXISTS idx_ai_usage_logs_user_id ON ai_usage_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_logs_created_at ON ai_usage_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_logs_model ON ai_usage_logs(model);
+
 -- Row Level Security (RLS) Policies
 
 -- Enable RLS
 ALTER TABLE user_subscriptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE webhook_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ai_usage_logs ENABLE ROW LEVEL SECURITY;
 
 -- User Subscriptions Policies
 -- Users can only read their own subscriptions
@@ -98,6 +117,22 @@ CREATE POLICY "Users can update own profile"
   TO authenticated
   USING (auth.uid() = id)
   WITH CHECK (auth.uid() = id);
+
+-- AI Usage Logs Policies
+-- Users can view their own AI usage
+CREATE POLICY "Users can view own AI usage"
+  ON ai_usage_logs
+  FOR SELECT
+  TO authenticated
+  USING (auth.uid() = user_id);
+
+-- Only service role can insert AI usage logs
+CREATE POLICY "Service role can manage AI usage logs"
+  ON ai_usage_logs
+  FOR ALL
+  TO service_role
+  USING (true)
+  WITH CHECK (true);
 
 -- Function to automatically create profile on user signup
 CREATE OR REPLACE FUNCTION public.handle_new_user()
@@ -162,4 +197,6 @@ GRANT SELECT ON active_subscriptions TO service_role;
 COMMENT ON TABLE user_subscriptions IS 'Stores user subscription information from RevenueCat';
 COMMENT ON TABLE webhook_logs IS 'Logs all incoming webhooks for debugging and audit';
 COMMENT ON TABLE profiles IS 'User profile information';
+COMMENT ON TABLE ai_usage_logs IS 'Tracks AI API usage for analytics and billing purposes';
 COMMENT ON VIEW active_subscriptions IS 'View of currently active subscriptions with user details';
+
