@@ -18,26 +18,27 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 })
     }
 
-    // 2. Parse Multipart Form Data (Audio File & Mode)
-    // We expect a file named 'audio'
-    // Optional field 'mode': 'conversation' (default) | 'transcribe'
     const formData = await req.formData()
     const audioFile = formData.get('audio') as File
-    const mode = formData.get('mode') as string || 'conversation'
     
     if (!audioFile) {
         return new Response(JSON.stringify({ error: 'No audio file provided' }), { status: 400 })
     }
 
     const novitaKey = Deno.env.get('NOVITA_AI_API_KEY')
-    if (!novitaKey) throw new Error('Missing Novita API Key')
+    if (!novitaKey) throw new Error('Missing Novita API Key (Check Supabase Secrets)')
+
+    console.log(`[DEBUG] API Key present? ${!!novitaKey}`)
 
     // --- STEP 1: SPEECH TO TEXT (GLM) ---
-    console.log(`[1/3] Transcribing audio with GLM-ASR (Mode: ${mode})...`)
+    console.log(`[1/3] Transcribing audio with GLM-ASR...`)
     
     // Convert file to base64 for Novita GLM-ASR endpoint
     const fileBuffer = await audioFile.arrayBuffer()
     const base64Audio = btoa(String.fromCharCode(...new Uint8Array(fileBuffer)))
+    
+    console.log(`[DEBUG] Audio File Size: ${fileBuffer.byteLength} bytes`)
+    console.log(`[DEBUG] Base64 Length: ${base64Audio.length}`)
 
     const sttRes = await fetch('https://api.novita.ai/v3/glm-asr', {
         method: 'POST',
@@ -47,25 +48,20 @@ Deno.serve(async (req) => {
         },
         body: JSON.stringify({
             file: base64Audio,
+            // Only add these if strictly required by Novita docs
+            // format: "m4a", 
         })
     })
 
     if (!sttRes.ok) {
-        const err = await sttRes.text()
-        throw new Error(`STT Error (GLM): ${err}`)
+        const errText = await sttRes.text()
+        console.error(`[GLM Error] Status: ${sttRes.status}, Body: ${errText}`)
+        throw new Error(`STT Error (Novita GLM): ${sttRes.status} - ${errText}`)
     }
 
     const sttData = await sttRes.json()
     const userText = sttData.text || sttData.transcript // Check output field name
     console.log(`User said: "${userText}"`)
-
-    // EARY EXIT IF MODE IS TRANSCRIBE ONLY
-    if (mode === 'transcribe') {
-        return new Response(
-            JSON.stringify({ transcript: userText }),
-            { headers: { 'Content-Type': 'application/json' } }
-        )
-    }
 
     // --- STEP 2: BRAIN (LLM - QWEN) ---
     console.log(`[2/3] Thinking with ${LLM_MODEL}...`)
