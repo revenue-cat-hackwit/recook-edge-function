@@ -1,206 +1,215 @@
-import "https://esm.sh/@supabase/functions-js/src/edge-runtime.d.ts"
+import "jsr:@supabase/functions-js/edge-runtime.d.ts"
+import { createClient } from 'jsr:@supabase/supabase-js@2'
 
-console.log("Generate Recipe function initialized")
+console.log("Generate Recipe function initialized (Vision/Video Mode)")
 
 interface RecipeRequest {
-  videoUrl?: string
-  prompt?: string
-  ingredients?: string[] // Optional: list of available ingredients
-  model?: string
-}
-
-// Helper to extract metadata AND Thumbnail from URL
-interface VideoData {
-  title: string;
-  desc: string;
-  thumbnailUrl?: string;
-  platform: 'youtube' | 'tiktok' | 'instagram' | 'other';
-}
-
-async function fetchVideoData(url: string): Promise<VideoData> {
-  console.log("Fetching data for:", url);
-  const data: VideoData = { title: "Unknown", desc: "", platform: 'other' };
-  
-  try {
-    // 1. Detect Platform & specific handling
-    if (url.includes('youtube.com') || url.includes('youtu.be')) {
-      data.platform = 'youtube';
-      // Extract Video ID
-      const videoId = url.match(/(?:youtu\.be\/|youtube\.com(?:\/embed\/|\/v\/|\/watch\?v=|\/watch\?.+&v=))([\w-]{11})/)?.[1];
-      if (videoId) {
-        data.thumbnailUrl = `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`;
-      }
-    } else if (url.includes('tiktok.com')) {
-      data.platform = 'tiktok';
-    } else if (url.includes('instagram.com')) {
-      data.platform = 'instagram';
-    }
-
-    // 2. Fetch Page for Metadata (Title, Desc, OG:Image)
-    // Note: Some platforms block fetch without proper headers/cookies
-    const response = await fetch(url, { 
-      headers: { 
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9'
-      } 
-    });
-    
-    if (response.ok) {
-      const html = await response.text();
-      
-      const titleMatch = html.match(/<title>(.*?)<\/title>/i);
-      const descMatch = html.match(/<meta name="description" content="(.*?)"/i);
-      const ogImageMatch = html.match(/<meta property="og:image" content="(.*?)"/i);
-
-      if (titleMatch) data.title = titleMatch[1];
-      if (descMatch) data.desc = descMatch[1];
-      
-      // Use og:image as thumbnail if we haven't found a better one (like YouTube's direct link)
-      if (!data.thumbnailUrl && ogImageMatch) {
-         // Some platforms escape characters, very basic unescape
-         data.thumbnailUrl = ogImageMatch[1].replace(/&amp;/g, '&');
-      }
-    }
-  } catch (_e) {
-    console.error("Failed to fetch url data:", _e);
-  }
-  return data;
+  videoUrl: string
 }
 
 Deno.serve(async (req) => {
   try {
+    // 1. Authorization Check
     const authHeader = req.headers.get('Authorization')
     if (!authHeader) {
       return new Response(JSON.stringify({ error: 'Missing authorization header' }), { status: 401 })
     }
 
-    const { videoUrl, prompt, ingredients, model = 'qwen/qwen3-vl-30b-a3b-instruct' }: RecipeRequest = await req.json()
+    // 2. Parse Input (Strictly Video URL only)
+    const { videoUrl } = await req.json() as RecipeRequest
 
-    // Build Messages Payload
-    const messages = [];
-    
-    // System Pormpt
-    const systemPrompt = `You are a professional Chef AI named "Pirinku Chef".
-    Your task is to generate a detailed cooking recipe based on the user's video input.
-    I will provide you with the VIDEO THUMBNAIL (Visual) and METADATA (Title/Context).
-    ANALYZE the image visually to identify the food, ingredients, and cooking style.
-    
-    OUTPUT FORMAT:
-    You MUST respond with a single valid JSON object following this interface:
-    {
-      "title": "Nama Resep",
-      "description": "Deskripsi singkat yang menggugah selera",
-      "time_minutes": 30,
-      "difficulty": "Easy" | "Medium" | "Hard",
-      "servings": 4,
-      "calories_per_serving": 350,
-      "ingredients": [
-        "200g ayam fillet",
-        "1 sdt garam"
-      ],
-      "tools": [
-        "Wajan anti lengket",
-        "Spatula"
-      ],
-      "steps": [
-        { "step": 1, "instruction": "Potong ayam dadu..." },
-        { "step": 2, "instruction": "Panaskan minyak..." }
-      ],
-      "tips": "Tips tambahan agar masakan makin enak."
+    if (!videoUrl) {
+      return new Response(JSON.stringify({ error: 'Video URL is required' }), { status: 400 })
     }
 
-    Do not include markdown formatting like \`\`\`json. Just raw JSON.`
+    // 2. Analyze Video Source
+    // console.log("Analyzing Video Source:", videoUrl);
+    let finalVideoUrl = videoUrl;
 
-    messages.push({ role: 'system', content: systemPrompt });
+    // Check if it is a social media link (TikTok/YouTube/IG/Twitter)
+    const socialMediaRegex = /(tiktok\.com|youtube\.com|youtu\.be|instagram\.com|x\.com|twitter\.com)/;
+    if (socialMediaRegex.test(videoUrl)) {
+        // console.log("Social media link detected, using Self-Hosted Cobalt to extract real video...");
+        
+        try {
+            // Using User's Self-Hosted Cobalt Instance (Confirmed Working)
+            // Note: Cobalt v10+ uses root endpoint for API
+            const cobaltApiUrl = "https://cobalt-production-6a89.up.railway.app/"; 
+            
+            const cobaltRes = await fetch(cobaltApiUrl, {
+                method: "POST",
+                headers: {
+                    "Accept": "application/json",
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    url: videoUrl
+                })
+            });
 
-    // User Message Content Construction
-    const userContent: any[] = [];
-    userContent.push({ type: 'text', text: "Tolong buatkan resep untuk masakan di video ini." });
+            const cobaltData = await cobaltRes.json();
+            // console.log("Cobalt Response:", cobaltData);
 
-    if (videoUrl) {
-      // Analyze Video URL
-      const videoData = await fetchVideoData(videoUrl);
-      
-      // Add Context Text
-      userContent.push({ 
-        type: 'text', 
-        text: `\n[VIDEO METADATA]\nURL: ${videoUrl}\nTitle: ${videoData.title}\nContext: ${videoData.desc}\nPlatform: ${videoData.platform}\n\nGunakan informasi di atas DAN GAMBAR yang saya kirim ini untuk menebak resepnya.` 
-      });
+            if (cobaltData.url) {
+                finalVideoUrl = cobaltData.url;
+                // console.log("Successfully extracted video URL");
+            } else if (cobaltData.status === 'tunnel' && cobaltData.url) {
+                 finalVideoUrl = cobaltData.url;
+                 // console.log("Successfully extracted Tunnel video URL");
+            } else if (cobaltData.status === 'redirect' && cobaltData.url) {
+                 finalVideoUrl = cobaltData.url;
+                 // console.log("Successfully extracted Redirect video URL");
+            } else {
+                console.warn("Cobalt failed to extract video or returned unknown format.");
+                // We fallback to original URL
+            }
 
-      // Add Thumbnail Image if available
-      if (videoData.thumbnailUrl) {
-        console.log("Found thumbnail:", videoData.thumbnailUrl);
-        userContent.push({
-          type: 'image_url',
-          image_url: { url: videoData.thumbnailUrl }
-        });
-      } else {
-        userContent.push({ type: 'text', text: "(Maaf, saya tidak bisa mengambil gambar dari video ini. Tolong analisis dari Judul dan Deskripsi saja)." });
-      }
+
+
+            // BRIDGE: Upload to Supabase Storage to standardize the URL (remove attachment headers, etc)
+            console.log("Bridging video to Supabase Storage...");
+            try {
+                const videoRes = await fetch(finalVideoUrl);
+                if (videoRes.ok) {
+                   const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
+                   const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+                   const supabase = createClient(supabaseUrl, supabaseServiceKey);
+
+                   // Use ArrayBuffer to avoid stream compatibility issues in some edge versions
+                   const videoBlob = await videoRes.arrayBuffer(); 
+                   const fileName = `ai_cache/${Date.now()}.mp4`;
+
+                   const { error: uploadError } = await supabase.storage
+                        .from('videos')
+                        .upload(fileName, videoBlob, {
+                            contentType: 'video/mp4',
+                            upsert: true
+                        });
+                    
+                   if (!uploadError) {
+                       const { data: { publicUrl } } = supabase.storage
+                            .from('videos')
+                            .getPublicUrl(fileName);
+                        
+                        finalVideoUrl = publicUrl;
+                        console.log("Bridged Video URL:", finalVideoUrl);
+                   } else {
+                       console.error("Bridge upload failed:", uploadError);
+                   }
+                }
+            } catch (bridgeError) {
+                 console.error("Bridge failed:", bridgeError);
+            }
+
+        } catch (e) {
+            console.error("Cobalt API Error:", e);
+        }
     }
-    
-    if (ingredients && ingredients.length > 0) {
-       userContent.push({ type: 'text', text: `Bahan yang saya punya: ${ingredients.join(', ')}.` });
-    }
 
-    if (prompt) {
-       userContent.push({ type: 'text', text: `Tambahan keinginan user: ${prompt}` });
-    }
+    console.log("Final Video URL extracted");
 
-    messages.push({ role: 'user', content: userContent });
-
-    // Get Novita AI API key
+    // 3. Prepare AI Request for Novita AI (Qwen-VL or compatible)
     const novitaApiKey = Deno.env.get('NOVITA_AI_API_KEY')
-    if (!novitaApiKey) {
-      throw new Error('NOVITA_AI_API_KEY not configured')
-    }
+    if (!novitaApiKey) throw new Error('NOVITA_AI_API_KEY not configured');
 
-    // Call Novita AI
-    const novitaResponse = await fetch('https://api.novita.ai/openai/chat/completions', {
+    const systemPrompt = `You are "Pirinku Chef", an expert AI Chef. 
+Your task is to watch the provided video and generate a precise cooking recipe based on what is shown.
+Ignote any non-food content. If the video is not about cooking, return an error in the JSON.
+If the video URL is invalid or blocked, try to infer the recipe from any available metadata or return a polite error.
+
+OUTPUT FORMAT (JSON ONLY):
+{
+  "title": "Recipe Name",
+  "description": "Brief description of the dish",
+  "time_minutes": 30,
+  "difficulty": "Easy",
+  "servings": 2,
+  "calories_per_serving": 400,
+  "ingredients": ["Item 1", "Item 2"],
+  "tools": ["Tool 1", "Tool 2"],
+  "steps": [
+    { "step": 1, "instruction": "Step 1 details..." },
+    { "step": 2, "instruction": "Step 2 details..." }
+  ],
+  "tips": "A helpful chef tip"
+}
+Do not use markdown formatting. Return raw JSON.`;
+
+    // Construct the payload exactly as requested for Video Input
+    const requestPayload = {
+      model: "qwen/qwen3-vl-30b-a3b-instruct", // Back to user requested model
+      messages: [
+        {
+          role: "system",
+          content: systemPrompt
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: `Please watch this video and create a detailed recipe from it. Original Link: ${videoUrl}`
+            },
+            {
+              type: "video_url",
+              video_url: {
+                url: finalVideoUrl
+              }
+            }
+          ]
+        }
+      ],
+      max_tokens: 2000,
+      temperature: 0.2, // Lower temperature for more accurate extraction
+      response_format: { type: "json_object" } // Force JSON if supported, otherwise system prompt handles it
+    };
+
+    console.log("Sending to AI...");
+
+    // 4. Call Novita AI
+    const aiRes = await fetch('https://api.novita.ai/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${novitaApiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        model: model,
-        messages: messages,
-        max_tokens: 1500,
-        temperature: 0.7,
-        response_format: { type: "json_object" } // Force JSON mode if supported
-      })
-    })
+      body: JSON.stringify(requestPayload)
+    });
 
-    if (!novitaResponse.ok) {
-       const err = await novitaResponse.text();
-       console.error("AI Error:", err);
-       throw new Error(`AI Provider Error: ${err}`);
+    if (!aiRes.ok) {
+        const errorText = await aiRes.text();
+        console.error("AI API Error:", errorText);
+        throw new Error(`AI Provider Error: ${errorText}`);
     }
 
-    const aiData = await novitaResponse.json()
-    const rawContent = aiData.choices[0].message.content
+    const aiJson = await aiRes.json();
+    console.log("AI Response received");
     
-    // Parse JSON safely
+    const content = aiJson.choices[0].message.content;
+
+    // 5. Parse JSON
     let recipeData;
     try {
-      // Remove potential markdown code blocks if AI puts them
-      const cleanJson = rawContent.replace(/```json/g, '').replace(/```/g, '').trim();
-      recipeData = JSON.parse(cleanJson);
-    } catch (_e) {
-      console.error("Failed to parse JSON:", rawContent);
-      throw new Error("AI did not return valid JSON");
+        // Clean up any markdown code blocks if present
+        const cleanJson = content.replace(/```json/g, '').replace(/```/g, '').trim();
+        recipeData = JSON.parse(cleanJson);
+        
+        // Append source URL for reference
+        recipeData.sourceUrl = videoUrl;
+    } catch (e) {
+        console.error("JSON Parse Error. Raw content:", content);
+        throw new Error("Failed to parse recipe from AI response");
     }
 
-    return new Response(
-      JSON.stringify({ success: true, data: recipeData }),
-      { headers: { 'Content-Type': 'application/json' } }
-    )
+    return new Response(JSON.stringify({ success: true, data: recipeData }), {
+      headers: { 'Content-Type': 'application/json' }
+    });
 
-  } catch (error: any) {
-    console.error(error)
-    return new Response(
-      JSON.stringify({ success: false, error: error.message }),
-      { status: 500, headers: { 'Content-Type': 'application/json' } }
-    )
+    }
+catch (error: any) {
+    console.error("Function Error:", error);
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      status: 500, headers: { 'Content-Type': 'application/json' }
+    });
   }
 })

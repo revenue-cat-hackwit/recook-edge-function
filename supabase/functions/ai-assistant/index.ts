@@ -6,9 +6,12 @@ import { createClient } from 'jsr:@supabase/supabase-js@2'
 console.log("AI Assistant function initialized")
 
 interface MessageContent {
-  type: 'text' | 'image_url'
+  type: 'text' | 'image_url' | 'video_url'
   text?: string
   image_url?: {
+    url: string
+  }
+  video_url?: {
     url: string
   }
 }

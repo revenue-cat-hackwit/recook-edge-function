@@ -7,8 +7,7 @@ console.log("Voice Processor initialized")
 // --- Configuration ---
 const NOVITA_BASE_URL = 'https://api.novita.ai/v3/openai' // Check exact base URL for your specific endpoints
 const LLM_MODEL = 'qwen/qwen3-vl-30b-a3b-instruct'
-const STT_MODEL = 'glm-4-voice' // Placeholder name, check Novita docs for exact GLM Audio model ID
-const TTS_MODEL = 'minimax-speech-02-hd' // Minimax HD model for better quality
+const TTS_MODEL = 'minimax-speech-02-turbo' // Turbo model for lower latency
 
 Deno.serve(async (req) => {
   try {
@@ -18,80 +17,66 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 })
     }
 
-    const formData = await req.formData()
-    const audioFile = formData.get('audio') as File
+    const { text: userText, config } = await req.json()
     
-    if (!audioFile) {
-        return new Response(JSON.stringify({ error: 'No audio file provided' }), { status: 400 })
+    if (!userText) {
+        return new Response(JSON.stringify({ error: 'No text provided' }), { status: 400 })
     }
+
+    // Default Config
+    const voiceId = config?.voiceId || "Wise_Woman";
+    const speed = config?.speed || 1.0;
+    const emotion = config?.emotion || "happy";
+    const isPreview = config?.preview || false;
+    const language = config?.language || "id"; // Default 'id'
 
     const novitaKey = Deno.env.get('NOVITA_AI_API_KEY')
     if (!novitaKey) throw new Error('Missing Novita API Key (Check Supabase Secrets)')
 
-    console.log(`[DEBUG] API Key present? ${!!novitaKey}`)
+    console.log(`User said: "${userText}"`)
+    console.log(`Voice Config: ${voiceId} (${speed}x, ${emotion}, Preview: ${isPreview}, Lang: ${language})`)
 
-    // --- STEP 1: SPEECH TO TEXT (GLM) ---
-    console.log(`[1/3] Transcribing audio with GLM-ASR...`)
-    
-    // Convert file to base64 for Novita GLM-ASR endpoint
-    const fileBuffer = await audioFile.arrayBuffer()
-    const base64Audio = btoa(String.fromCharCode(...new Uint8Array(fileBuffer)))
-    
-    console.log(`[DEBUG] Audio File Size: ${fileBuffer.byteLength} bytes`)
-    console.log(`[DEBUG] Base64 Length: ${base64Audio.length}`)
+    let replyText = "";
 
-    const sttRes = await fetch('https://api.novita.ai/v3/glm-asr', {
-        method: 'POST',
-        headers: { 
-            'Authorization': `Bearer ${novitaKey}`,
-            'Content-Type': 'application/json' 
-        },
-        body: JSON.stringify({
-            file: base64Audio,
-            // Only add these if strictly required by Novita docs
-            // format: "m4a", 
+    if (isPreview) {
+        // --- PREVIEW MODE: SKIP LLM ---
+        console.log(`[Preview Mode] Skipping LLM...`)
+        replyText = language === 'en' ? "Hello, this is a sample of my voice." : "Halo, ini adalah contoh suara saya.";
+    } else {
+        // --- STEP 1: BRAIN (LLM - QWEN) ---
+        console.log(`[1/2] Thinking with ${LLM_MODEL}...`)
+
+        const systemPrompt = language === 'en' 
+            ? 'You are Chef Pirinku, a friendly cooking assistant. Answer briefly, concisely, and conversationally (spoken style). Max 2-3 sentences.'
+            : 'Kamu adalah Chef Pirinku yang ramah. Jawablah dengan singkat, padat, dan seperti berbicara lisan (conversational). Maksimal 2-3 kalimat.';
+
+        const chatRes = await fetch(`${NOVITA_BASE_URL}/chat/completions`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${novitaKey}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                model: LLM_MODEL,
+                messages: [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: userText }
+                ],
+                max_tokens: 150 // Keep it short for TTS speed
+            })
         })
-    })
 
-    if (!sttRes.ok) {
-        const errText = await sttRes.text()
-        console.error(`[GLM Error] Status: ${sttRes.status}, Body: ${errText}`)
-        throw new Error(`STT Error (Novita GLM): ${sttRes.status} - ${errText}`)
+        if (!chatRes.ok) throw new Error(`LLM Error: ${await chatRes.text()}`)
+        
+        const chatData = await chatRes.json()
+        replyText = chatData.choices[0].message.content
+        console.log(`Chef replies: "${replyText}"`)
     }
 
-    const sttData = await sttRes.json()
-    const userText = sttData.text || sttData.transcript // Check output field name
-    console.log(`User said: "${userText}"`)
+    // --- STEP 2: TEXT TO SPEECH (MINIMAX TURBO) ---
+    console.log(`[2/2] Generating voice with ${TTS_MODEL}...`)
 
-    // --- STEP 2: BRAIN (LLM - QWEN) ---
-    console.log(`[2/3] Thinking with ${LLM_MODEL}...`)
-
-    const chatRes = await fetch(`${NOVITA_BASE_URL}/chat/completions`, {
-        method: 'POST',
-        headers: {
-            'Authorization': `Bearer ${novitaKey}`,
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-            model: LLM_MODEL,
-            messages: [
-                { role: 'system', content: 'Kamu adalah Chef Pirinku yang ramah. Jawablah dengan singkat, padat, dan seperti berbicara lisan (conversational). Maksimal 2-3 kalimat.' },
-                { role: 'user', content: userText }
-            ],
-            max_tokens: 150 // Keep it short for TTS speed
-        })
-    })
-
-    if (!chatRes.ok) throw new Error(`LLM Error: ${await chatRes.text()}`)
-    
-    const chatData = await chatRes.json()
-    const replyText = chatData.choices[0].message.content
-    console.log(`Chef replies: "${replyText}"`)
-
-    // --- STEP 3: TEXT TO SPEECH (MINIMAX HD) ---
-    console.log(`[3/3] Generating voice with Minimax HD...`)
-
-    const ttsRes = await fetch('https://api.novita.ai/v3/minimax-speech-02-hd', {
+    const ttsRes = await fetch(`https://api.novita.ai/v3/${TTS_MODEL}`, {
         method: 'POST',
         headers: {
             'Authorization': `Bearer ${novitaKey}`,
@@ -99,11 +84,13 @@ Deno.serve(async (req) => {
         },
         body: JSON.stringify({
             text: replyText,
+            output_format: "url", // Request URL instead of Hex/Base64
             voice_setting: {
-                voice_id: "male-qn-qingse", // Example voice ID (Male - Qingse)
-                speed: 1,
+                voice_id: voiceId,
+                speed: speed,
                 vol: 1,
-                pitch: 0
+                pitch: 0,
+                emotion: emotion
             },
             audio_setting: {
                 sample_rate: 32000,
@@ -120,14 +107,14 @@ Deno.serve(async (req) => {
     }
 
     const ttsData = await ttsRes.json()
-    const audioBase64 = ttsData.audio // Minimax returns base64 directly in 'audio' field
+    const audioUrl = ttsData.audio // Now contains HTTPS URL
 
     // --- FINISH ---
     return new Response(
         JSON.stringify({
             transcript: userText,
             reply: replyText,
-            audio: audioBase64
+            audio: audioUrl
         }),
         { headers: { 'Content-Type': 'application/json' } }
     )
