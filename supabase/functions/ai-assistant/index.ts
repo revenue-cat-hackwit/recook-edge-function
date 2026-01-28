@@ -74,6 +74,8 @@ Deno.serve(async (req) => {
     }
 
     // Check if user has active subscription (optional - for premium features)
+    // ... (Auth Logic) ...
+
     const { data: subscription } = await supabase
       .from('user_subscriptions')
       .select('status, expires_at')
@@ -84,6 +86,39 @@ Deno.serve(async (req) => {
     const hasActiveSubscription = subscription && 
       (!subscription.expires_at || new Date(subscription.expires_at) > new Date())
 
+    // --- CONTEXT RETRIEVAL (The "Super App" Logic) ---
+    // 1. Fetch Profile (Preferences)
+    const { data: profile } = await supabase
+        .from('profiles')
+        .select('allergies, diet_goal, equipment')
+        .eq('id', user?.id)
+        .single();
+    
+    // 2. Fetch Pantry
+    const { data: pantry } = await supabase
+        .from('pantry_items')
+        .select('ingredient_name, quantity, expiry_date')
+        .eq('user_id', user?.id)
+        .order('expiry_date', { ascending: true }); // Use expiring first
+
+    // 3. Build Context String
+    let systemContext = "You are Chef Pirinku, an expert cooking assistant. Be helpful, concise, and friendly.";
+    
+    if (profile) {
+        if (profile.diet_goal) systemContext += `\nUser's Goal: ${profile.diet_goal}.`;
+        if (profile.allergies && profile.allergies.length > 0) systemContext += `\nALLERGIES (CRITICAL): ${profile.allergies.join(', ')}.`;
+        if (profile.equipment && profile.equipment.length > 0) systemContext += `\nKitchen Tools: ${profile.equipment.join(', ')}.`;
+    }
+
+    if (pantry && pantry.length > 0) {
+        const ingredients = pantry.map((item: any) => 
+            `- ${item.ingredient_name} (${item.quantity})`
+        ).join('\n');
+        systemContext += `\n\n[USER PANTRY INVENTORY - USE THESE INGREDIENTS IF POSSIBLE]:\n${ingredients}`;
+    } else {
+         systemContext += `\n\n[User Pantry is Empty]`;
+    }
+
     // Parse request body
     const { 
       messages, 
@@ -93,33 +128,40 @@ Deno.serve(async (req) => {
     }: AIRequest = await req.json()
 
     if (!messages || messages.length === 0) {
-      return new Response(
-        JSON.stringify({ error: 'Messages array is required' }),
-        { status: 400, headers: { 'Content-Type': 'application/json' } }
-      )
+      return new Response(JSON.stringify({ error: 'Messages array is required' }), { status: 400 });
+    }
+
+    // 4. Inject System Prompt
+    // Check if first message is system
+    const finalMessages = [...messages];
+    if (finalMessages.length > 0 && finalMessages[0].role === 'system') {
+        // Append to existing system prompt (assuming text content)
+        if (typeof finalMessages[0].content === 'string') {
+            finalMessages[0].content = systemContext + "\n\n" + finalMessages[0].content;
+        }
+    } else {
+        // Prepend new system prompt
+        finalMessages.unshift({ role: 'system', content: systemContext });
     }
 
     // Get Novita AI API key
     const novitaApiKey = Deno.env.get('NOVITA_AI_API_KEY')
     if (!novitaApiKey) {
       console.error('NOVITA_AI_API_KEY not set')
-      return new Response(
-        JSON.stringify({ error: 'AI service not configured' }),
-        { status: 500, headers: { 'Content-Type': 'application/json' } }
-      )
+      return new Response(JSON.stringify({ error: 'AI service not configured' }), { status: 500 });
     }
 
     // Determine task type based on message content
     let taskType = 'chat'
-    for (const message of messages) {
+    for (const message of finalMessages) { // Use finalMessages
       if (Array.isArray(message.content)) {
-        const hasImage = message.content.some(c => c.type === 'image_url')
+        const hasImage = message.content.some((c: any) => c.type === 'image_url')
         if (hasImage) {
           taskType = 'image_analysis'
           break
         }
       }
-    }
+    } 
 
     // Call Novita AI API (OpenAI-compatible)
     const novitaResponse = await fetch('https://api.novita.ai/openai/chat/completions', {
@@ -130,7 +172,7 @@ Deno.serve(async (req) => {
       },
       body: JSON.stringify({
         model: model,
-        messages: messages,
+        messages: finalMessages, // Use Context-Aware Messages
         max_tokens: max_tokens,
         temperature: temperature,
       })

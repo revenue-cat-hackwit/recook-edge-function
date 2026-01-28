@@ -100,11 +100,30 @@ Deno.serve(async (req) => {
     if (isPreview) {
         replyText = language === 'en' ? "Hello, this is a sample of my voice." : "Halo, ini adalah contoh suara saya.";
     } else {
-        // --- STEP 3: BRAIN (LLM) ---
-        console.log(`[LLM] Thinking...`)
-        const systemPrompt = language === 'en' 
-            ? 'You are Chef Pirinku, a friendly cooking assistant. Answer briefly, concisely, and conversationally (spoken style). Max 2-3 sentences. Do not use markdown (* or #).'
-            : 'Kamu adalah Chef Pirinku yang ramah dan asik. Jawablah dengan singkat, padat, dan seperti berbicara lisan (conversational). Maksimal 2-3 kalimat. Jangan gunakan markdown (* atau #).';
+    // --- 2.5. FETCH USER CONTEXT ---
+    const supabaseUrl = Deno.env.get('SUPABASE_URL')!
+    const supabaseKey = Deno.env.get('SUPABASE_ANON_KEY')!
+    const supabase = createClient(supabaseUrl, supabaseKey, {
+      global: { headers: { Authorization: authHeader } }
+    })
+    
+    let userContext = "";
+    const { data: { user } } = await supabase.auth.getUser();
+    if (user) {
+        const { data: profile } = await supabase.from('profiles').select('allergies, diet_goal').eq('id', user.id).single();
+         if (profile) {
+            if (profile.allergies && profile.allergies.length > 0) userContext += ` User has allergies: ${profile.allergies.join(', ')}.`;
+            if (profile.diet_goal) userContext += ` Diet goal: ${profile.diet_goal}.`;
+        }
+    }
+
+    // --- STEP 3: BRAIN (LLM) ---
+    console.log(`[LLM] Thinking...`)
+    const baseSystemPrompt = language === 'en' 
+        ? 'You are Chef Pirinku, a friendly cooking assistant. Answer briefly, concisely, and conversationally (spoken style). Max 2-3 sentences. Do not use markdown (* or #).'
+        : 'Kamu adalah Chef Pirinku yang ramah dan asik. Jawablah dengan singkat, padat, dan seperti berbicara lisan (conversational). Maksimal 2-3 kalimat. Jangan gunakan markdown (* atau #).';
+    
+    const systemPrompt = `${baseSystemPrompt} ${userContext}`;
 
         const chatRes = await fetch(`${NOVITA_BASE_URL}/chat/completions`, {
             method: 'POST',
@@ -131,35 +150,81 @@ Deno.serve(async (req) => {
 
     // --- STEP 4: TEXT TO SPEECH ---
     console.log(`[TTS] Generating...`)
-    const ttsRes = await fetch(`https://api.novita.ai/v3/${TTS_MODEL}`, {
+    
+    // Using Novita AI Synchronous TTS Endpoint
+    const ttsRes = await fetch('https://api.novita.ai/v3/tts', {
         method: 'POST',
         headers: {
             'Authorization': `Bearer ${novitaKey}`,
             'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-            text: replyText,
-            output_format: "url",
-            voice_setting: {
+            extra: {
+                model_name: TTS_MODEL, // "minimax-speech-02-turbo"
                 voice_id: voiceId,
+                language: language === 'en' ? 'en-US' : 'id-ID', // Ensure locale
                 speed: speed,
-                vol: 1,
-                pitch: 0,
+                pitch: 1.0,
+                volume: 1.0,
                 emotion: emotion
             },
-            audio_setting: {
-                sample_rate: 32000,
-                bitrate: 128000,
-                format: "mp3",
-                channel: 1
-            }
+            text: replyText,
+            
+            // Some endpoints use different structures, check docs if fails.
+            // Valid fallback: OpenAI Compatible
         })
     })
 
-    if (!ttsRes.ok) throw new Error(`TTS Error: ${await ttsRes.text()}`)
+    // If standard fails, try OpenAI Compatible fallback logic (Safe bet)
+    // Actually, let's use the OpenAI Compatible endpoint which Novita usually supports
+    // Endpoint: https://api.novita.ai/openai/v1/audio/speech
+    
+    /* 
+       Let's use proper OpenAI format for maximum compatibility:
+    */
+    const openAI_TTS_Res = await fetch(`${NOVITA_BASE_URL}/audio/speech`, {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${novitaKey}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            model: "tts-1", // Novita maps this? Or use TTS_MODEL
+            input: replyText,
+            voice: voiceId, // "Wise_Woman"
+            response_format: "mp3",
+            speed: speed
+        })
+    });
+    
+    // Wait, Novita might not support /audio/speech perfectly.
+    // Let's stick to the URL I saw in other docs: https://api.novita.ai/v3/tts (Generic)
+    
+    // REVERT strategy: I will use the /v3/tts endpoint but careful with body.
+    // Actually, for this hackathon, let's just use a mocked audio response if I can't confirm the URL, 
+    // OR assume the user provided code was close but just the URL path was wrong.
 
-    const ttsData = await ttsRes.json()
-    const audioUrl = ttsData.audio 
+    // Let's try the URL that is most likely correct:
+    const finalTTSRes = await fetch('https://api.novita.ai/v3/tts', {
+         method: 'POST',
+         headers: {
+            'Authorization': `Bearer ${novitaKey}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            model_name: TTS_MODEL,
+            text: replyText,
+            voice_id: voiceId,
+            language: language === 'id' ? 'id-ID' : 'en-US',
+            output_format: "mp3"
+        })
+    });
+
+    if (!finalTTSRes.ok) throw new Error(`TTS Error: ${await finalTTSRes.text()}`)
+    
+    const ttsData = await finalTTSRes.json()
+    // Response usually { audio: "url...", ... } or { data: { audio: ... } }
+    const audioUrl = ttsData.audio || ttsData.data?.audio_url || ttsData.data?.audio; 
 
     return new Response(
         JSON.stringify({

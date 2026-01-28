@@ -5,6 +5,11 @@ console.log("Generate Recipe function initialized (Vision/Video Mode)")
 
 interface RecipeRequest {
   videoUrl: string
+  userPreferences?: {
+    allergies: string[];
+    dietGoal: string;
+    equipment: string[];
+  }
 }
 
 Deno.serve(async (req) => {
@@ -16,11 +21,13 @@ Deno.serve(async (req) => {
     }
 
     // 2. Parse Input (Strictly Video URL only)
-    const { videoUrl } = await req.json() as RecipeRequest
+    const { videoUrl, userPreferences } = await req.json() as RecipeRequest
 
     if (!videoUrl) {
       return new Response(JSON.stringify({ error: 'Video URL is required' }), { status: 400 })
     }
+    
+    // ... (Media Analysis Logic remains the same) ...
 
     // 2. Analyze Media Source
     console.log("Analyzing Media Source:", videoUrl);
@@ -106,9 +113,57 @@ Deno.serve(async (req) => {
     const novitaApiKey = Deno.env.get('NOVITA_AI_API_KEY')
     if (!novitaApiKey) throw new Error('NOVITA_AI_API_KEY not configured');
 
+    // 2b. Fetch User Context from DB (Source of Truth)
+    const supabaseUrl = Deno.env.get('SUPABASE_URL')!
+    const supabaseKey = Deno.env.get('SUPABASE_ANON_KEY')!
+    const supabase = createClient(supabaseUrl, supabaseKey, {
+      global: { headers: { Authorization: authHeader } }
+    })
+    
+    let dbPreferences: any = {};
+    let dbPantry: any[] = [];
+
+    const { data: { user } } = await supabase.auth.getUser();
+    if (user) {
+        // Fetch Profile
+        const { data: profile } = await supabase.from('profiles').select('allergies, diet_goal, equipment').eq('id', user.id).single();
+        if (profile) dbPreferences = profile;
+
+        // Fetch Pantry (Optional: Use ingredients from pantry)
+        const { data: pantry } = await supabase.from('pantry_items').select('ingredient_name').eq('user_id', user.id);
+        if (pantry) dbPantry = pantry; // Could prompt AI to use these
+    }
+
+    // Merge: DB takes precedence over client-side if available, or fallback
+    const finalPreferences = {
+        allergies: dbPreferences.allergies || userPreferences?.allergies || [],
+        dietGoal: dbPreferences.diet_goal || userPreferences?.dietGoal || '',
+        equipment: dbPreferences.equipment || userPreferences?.equipment || []
+    };
+
+    let prefsPrompt = "";
+    if (finalPreferences.allergies.length > 0) {
+        prefsPrompt += `\nCRITICAL: The user has ALLERGIES to: ${finalPreferences.allergies.join(', ')}. Do NOT include these ingredients. Suggest safe alternatives if necessary.`;
+    }
+    if (finalPreferences.dietGoal) {
+        prefsPrompt += `\nUser's diet goal is: ${finalPreferences.dietGoal}. Adjust portions or ingredients to align with this (e.g. less oil, more protein).`;
+    }
+    if (finalPreferences.equipment.length > 0) {
+        prefsPrompt += `\nUser has these tools: ${finalPreferences.equipment.join(', ')}. Tailor instructions to use these tools.`;
+    }
+    if (dbPantry.length > 0) {
+         const pantryNames = dbPantry.map((p: any) => p.ingredient_name).join(', ');
+         prefsPrompt += `\nUser has these ingredients in PANTRY: ${pantryNames}. Try to use them if they fit the recipe.`;
+    }
+
+    console.log("Using User Prefs:", prefsPrompt);
+
     const systemPrompt = `You are "Pirinku Chef", an expert AI Chef. 
 Your task is to analyze the provided media (video or images) and generate a precise cooking recipe.
 Ignore non-food content.
+
+${prefsPrompt}
+
 OUTPUT JSON format exactly as requested:
 {
   "title": "", "description": "", "time_minutes": 0, "difficulty": "", 
@@ -172,6 +227,16 @@ OUTPUT JSON format exactly as requested:
         
         // Append source URL for reference
         recipeData.sourceUrl = videoUrl;
+
+        // Try to capture a valid image URL for the thumbnail
+        const firstImage = finalMediaItems.find(i => i.type === 'image');
+        if (firstImage) {
+            recipeData.imageUrl = firstImage.url;
+        } else if (finalMediaItems.length > 0) {
+             // Fallback to whatever URL we have (e.g. video)
+             // The frontend might need to generate a thumbnail properly later
+             recipeData.imageUrl = finalMediaItems[0].url; 
+        }
     } catch (e) {
         console.error("JSON Parse Error. Raw content:", content);
         throw new Error("Failed to parse recipe from AI response");

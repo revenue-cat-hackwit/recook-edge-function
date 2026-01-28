@@ -24,9 +24,22 @@ CREATE TABLE IF NOT EXISTS profiles (
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- Ensure columns exist (in case table already existed without them)
+DO $$
+BEGIN
+    ALTER TABLE profiles ADD COLUMN IF NOT EXISTS email TEXT;
+    ALTER TABLE profiles ADD COLUMN IF NOT EXISTS full_name TEXT;
+    ALTER TABLE profiles ADD COLUMN IF NOT EXISTS avatar_url TEXT;
+    ALTER TABLE profiles ADD COLUMN IF NOT EXISTS allergies TEXT[];
+    ALTER TABLE profiles ADD COLUMN IF NOT EXISTS diet_goal TEXT;
+    ALTER TABLE profiles ADD COLUMN IF NOT EXISTS equipment TEXT[];
+EXCEPTION
+    WHEN duplicate_column THEN RAISE NOTICE 'column already exists';
+END $$;
+
 -- User Subscriptions (RevenueCat)
 CREATE TABLE IF NOT EXISTS user_subscriptions (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
   product_id TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('active', 'expired', 'billing_issue', 'cancelled')),
@@ -46,7 +59,7 @@ CREATE TABLE IF NOT EXISTS user_subscriptions (
 
 -- User Generated Recipes
 CREATE TABLE IF NOT EXISTS user_recipes (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
   title TEXT NOT NULL,
   description TEXT,
@@ -70,7 +83,7 @@ CREATE TABLE IF NOT EXISTS user_recipes (
 
 -- Saved Recipes (Favorites/Bookmarks)
 CREATE TABLE IF NOT EXISTS saved_recipes (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
   recipe_id UUID REFERENCES user_recipes(id) ON DELETE CASCADE NOT NULL,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -81,7 +94,7 @@ CREATE TABLE IF NOT EXISTS saved_recipes (
 -- Note: We can either query user_recipes where is_public=true OR use a separate table.
 -- A separate table allows "snapshots" so editing the private recipe doesn't break the public post.
 CREATE TABLE IF NOT EXISTS community_posts (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
   original_recipe_id UUID REFERENCES user_recipes(id) ON DELETE SET NULL,
   
@@ -96,7 +109,7 @@ CREATE TABLE IF NOT EXISTS community_posts (
 
 -- Post Likes
 CREATE TABLE IF NOT EXISTS post_likes (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
   post_id UUID REFERENCES community_posts(id) ON DELETE CASCADE NOT NULL,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -109,7 +122,7 @@ CREATE TABLE IF NOT EXISTS post_likes (
 
 -- Shopping List
 CREATE TABLE IF NOT EXISTS shopping_list_items (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
   name TEXT NOT NULL,
   is_checked BOOLEAN DEFAULT false,
@@ -119,7 +132,7 @@ CREATE TABLE IF NOT EXISTS shopping_list_items (
 
 -- Chat History
 CREATE TABLE IF NOT EXISTS chat_messages (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
   role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
   content JSONB NOT NULL, -- Text or Structured Content
@@ -129,7 +142,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 
 -- Pantry Items (The Fridge)
 CREATE TABLE IF NOT EXISTS pantry_items (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
   ingredient_name TEXT NOT NULL,
   quantity TEXT,
@@ -140,7 +153,7 @@ CREATE TABLE IF NOT EXISTS pantry_items (
 
 -- Usage Logs
 CREATE TABLE IF NOT EXISTS ai_usage_logs (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
   model TEXT NOT NULL,
   task_type TEXT DEFAULT 'chat',
@@ -153,7 +166,7 @@ CREATE TABLE IF NOT EXISTS ai_usage_logs (
 
 -- Webhook Logs
 CREATE TABLE IF NOT EXISTS webhook_logs (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   source TEXT NOT NULL,
   event_type TEXT NOT NULL,
   payload JSONB NOT NULL,
@@ -165,7 +178,7 @@ CREATE TABLE IF NOT EXISTS webhook_logs (
 
 -- 12. Pantry Categories (Data-driven categorization)
 CREATE TABLE IF NOT EXISTS public.pantry_categories (
-  id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   name TEXT NOT NULL,
   keywords TEXT[] NOT NULL,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
@@ -228,15 +241,15 @@ CREATE POLICY "View public posts" ON community_posts
   FOR SELECT TO authenticated USING (true);
 
 -- 13. Reference Data (Allergies & Equipment)
-CREATE TABLE public.reference_allergies (
-  id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS public.reference_allergies (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   name TEXT NOT NULL UNIQUE
 );
 CREATE POLICY "Ref Allergies are viewable by everyone" ON public.reference_allergies FOR SELECT USING (true);
 
 
-CREATE TABLE public.reference_equipment (
-  id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS public.reference_equipment (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   name TEXT NOT NULL UNIQUE
 );
 CREATE POLICY "Ref Equipment are viewable by everyone" ON public.reference_equipment FOR SELECT USING (true);
