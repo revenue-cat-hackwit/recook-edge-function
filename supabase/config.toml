@@ -490,3 +490,47 @@ entrypoint = "./functions/voice-dictation/index.ts"
 # Specifies static files to be bundled with the function. Supports glob patterns.
 # For example, if you want to serve static HTML pages in your function:
 # static_files = [ "./functions/voice-dictation/*.html" ]
+
+[functions.extract-media]
+enabled = true
+verify_jwt = true
+import_map = "./functions/extract-media/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/extract-media/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/extract-media/*.html" ]
+
+[functions.analyze-pantry-image]
+enabled = true
+verify_jwt = true
+import_map = "./functions/analyze-pantry-image/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/analyze-pantry-image/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/analyze-pantry-image/*.html" ]
+
+[functions.generate-food-image]
+enabled = true
+verify_jwt = true
+import_map = "./functions/generate-food-image/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/generate-food-image/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/generate-food-image/*.html" ]
+
+[functions.generate-weekly-plan]
+enabled = true
+verify_jwt = true
+import_map = "./functions/generate-weekly-plan/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/generate-weekly-plan/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/generate-weekly-plan/*.html" ]

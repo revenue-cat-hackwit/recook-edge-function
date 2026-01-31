@@ -1,15 +1,17 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
 import { createClient } from 'jsr:@supabase/supabase-js@2'
 
-console.log("Generate Recipe function initialized (Vision/Video Mode)")
+console.log("Generate Recipe function initialized (AI Mode Only)")
 
 interface RecipeRequest {
-  videoUrl: string
+  mediaItems: { type: 'video' | 'image', url: string }[]
   userPreferences?: {
     allergies: string[];
     dietGoal: string;
     equipment: string[];
   }
+  // Optional: Backwards compatibility or single URL pass-through
+  videoUrl?: string
 }
 
 Deno.serve(async (req) => {
@@ -20,106 +22,33 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ error: 'Missing authorization header' }), { status: 401 })
     }
 
-    // 2. Parse Input (Strictly Video URL only)
-    const { videoUrl, userPreferences } = await req.json() as RecipeRequest
-
-    if (!videoUrl) {
-      return new Response(JSON.stringify({ error: 'Video URL is required' }), { status: 400 })
-    }
-    
-    // ... (Media Analysis Logic remains the same) ...
-
-    // 2. Analyze Media Source
-    console.log("Analyzing Media Source:", videoUrl);
-    const mediaItems: { type: 'video' | 'image', url: string }[] = [];
-
-    // Check if it is a social media link (TikTok/YouTube/IG/Twitter)
-    const socialMediaRegex = /(tiktok\.com|youtube\.com|youtu\.be|instagram\.com|x\.com|twitter\.com)/;
-    
-    // Check for comma-separated list (Multi-Upload)
-    const inputUrls = videoUrl.split(',').map(u => u.trim()).filter(Boolean);
-
-    if (inputUrls.length > 1) {
-         console.log(`Processing ${inputUrls.length} inputs...`);
-         inputUrls.forEach(url => {
-            if (/\.(mp4|mov)$/i.test(url)) {
-                mediaItems.push({ type: 'video', url });
-            } else {
-                // Assume image for safety or check ext
-                mediaItems.push({ type: 'image', url });
-            }
-         });
-    } else {
-        const singleUrl = inputUrls[0];
-
-        // A. Direct File Link (e.g. Uploaded Image)
-        if (/\.(jpg|jpeg|png|webp|heic)$/i.test(singleUrl)) {
-            mediaItems.push({ type: 'image', url: singleUrl });
-            console.log("Detected Direct Image URL");
-        }
-        // B. Social Media Link -> Cobalt extraction
-        else if (socialMediaRegex.test(singleUrl)) {
-            try {
-                const cobaltApiUrl = "https://cobalt-production-6a89.up.railway.app/"; 
-                
-                const cobaltRes = await fetch(cobaltApiUrl, {
-                    method: "POST",
-                    headers: { "Accept": "application/json", "Content-Type": "application/json" },
-                    body: JSON.stringify({ url: singleUrl })
-                });
-
-                const cobaltData = await cobaltRes.json();
-    
-                // Cobalt Response Handling...
-                // (Note: Using `cobaltData` from scope)
-                if (cobaltData.status === 'picker' && cobaltData.picker) {
-                    // Multi-Media (Carousel)
-                    console.log(`Detected Carousel with ${cobaltData.picker.length} items`);
-                    cobaltData.picker.forEach((item: any) => {
-                        if (item.type === 'photo') mediaItems.push({ type: 'image', url: item.url });
-                        if (item.type === 'video') mediaItems.push({ type: 'video', url: item.url });
-                    });
-                } 
-                else if (cobaltData.url) {
-                    const isImage = /\.(jpg|jpeg|png|webp)$/i.test(cobaltData.url);
-                    mediaItems.push({ type: isImage ? 'image' : 'video', url: cobaltData.url });
-                } 
-                else if (cobaltData.status === 'tunnel' || cobaltData.status === 'redirect') {
-                    if (cobaltData.url) {
-                        const isImage = /\.(jpg|jpeg|png|webp)$/i.test(cobaltData.url);
-                        mediaItems.push({ type: isImage ? 'image' : 'video', url: cobaltData.url });
-                    }
-                } else {
-                    console.warn("Cobalt unknown response, using original URL as fallback.");
-                    mediaItems.push({ type: 'video', url: singleUrl });
-                }
-
-            } catch (e) {
-                console.error("Cobalt Error, fallback to original:", e);
-                mediaItems.push({ type: 'video', url: singleUrl });
-            }
-        }
-        // C. Fallback
-        else {
-            mediaItems.push({ type: 'video', url: singleUrl });
-        }
-    }
-
-    // Limit items to avoid payload limits (Max 5 items)
-    const finalMediaItems = mediaItems.slice(0, 5);
-    console.log(`Prepared ${finalMediaItems.length} media items for AI`);
-
-    // 3. Prepare AI Request for Novita AI
-    const novitaApiKey = Deno.env.get('NOVITA_AI_API_KEY')
-    if (!novitaApiKey) throw new Error('NOVITA_AI_API_KEY not configured');
-
-    // 2b. Fetch User Context from DB (Source of Truth)
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!
     const supabaseKey = Deno.env.get('SUPABASE_ANON_KEY')!
     const supabase = createClient(supabaseUrl, supabaseKey, {
       global: { headers: { Authorization: authHeader } }
     })
-    
+
+    // 2. Parse Input
+    const { mediaItems, userPreferences, videoUrl } = await req.json() as RecipeRequest
+
+    // Validate Input
+    let finalMediaItems = mediaItems;
+    if (!finalMediaItems || finalMediaItems.length === 0) {
+        if (videoUrl) {
+            // Fallback: If user sent just a URL, treat it as a direct video link (assuming it was already processed or is direct)
+            finalMediaItems = [{ type: 'video', url: videoUrl }];
+        } else {
+            return new Response(JSON.stringify({ error: 'mediaItems or videoUrl is required' }), { status: 400 })
+        }
+    }
+
+    console.log(`Processing recipe generation for ${finalMediaItems.length} items`);
+
+    // 3. Prepare AI Request for Novita AI
+    const novitaApiKey = Deno.env.get('NOVITA_AI_API_KEY')
+    if (!novitaApiKey) throw new Error('NOVITA_AI_API_KEY not configured');
+
+    // 4. Fetch User Context from DB (Source of Truth)
     let dbPreferences: any = {};
     let dbPantry: any[] = [];
 
@@ -131,10 +60,10 @@ Deno.serve(async (req) => {
 
         // Fetch Pantry (Optional: Use ingredients from pantry)
         const { data: pantry } = await supabase.from('pantry_items').select('ingredient_name').eq('user_id', user.id);
-        if (pantry) dbPantry = pantry; // Could prompt AI to use these
+        if (pantry) dbPantry = pantry; 
     }
 
-    // Merge: DB takes precedence over client-side if available, or fallback
+    // Merge: DB takes precedence over client-side if available
     const finalPreferences = {
         allergies: dbPreferences.allergies || userPreferences?.allergies || [],
         dietGoal: dbPreferences.diet_goal || userPreferences?.dietGoal || '',
@@ -156,8 +85,6 @@ Deno.serve(async (req) => {
          prefsPrompt += `\nUser has these ingredients in PANTRY: ${pantryNames}. Try to use them if they fit the recipe.`;
     }
 
-    console.log("Using User Prefs:", prefsPrompt);
-
     const systemPrompt = `You are "Pirinku Chef", an expert AI Chef. 
 Your task is to analyze the provided media (video or images) and generate a precise cooking recipe.
 Ignore non-food content.
@@ -173,7 +100,7 @@ OUTPUT JSON format exactly as requested:
 
     // Construct Multi-Modal User Content
     const userContent: any[] = [
-        { type: "text", text: `Create a detailed recipe from this content. Source: ${videoUrl}` }
+        { type: "text", text: `Create a detailed recipe from this content.` }
     ];
 
     finalMediaItems.forEach(item => {
@@ -184,6 +111,44 @@ OUTPUT JSON format exactly as requested:
         }
     });
 
+    // 3. Define JSON Schema for Recipe
+    const recipeSchema = {
+      "type": "json_schema",
+      "json_schema": {
+        "name": "recipe_response",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "title": { "type": "string" },
+            "description": { "type": "string" },
+            "time_minutes": { "type": "number", "description": "Total cooking time in minutes (number only)" },
+            "difficulty": { "type": "string", "enum": ["Easy", "Medium", "Hard"] },
+            "servings": { "type": "number" },
+            "calories_per_serving": { "type": "number", "description": "Calories count used number only, no text like kcal" },
+            "ingredients": { 
+              "type": "array", 
+              "items": { "type": "string" },
+              "description": "List of ingredients with quantities, e.g. '200g Chicken breast'"
+            },
+            "tools": { "type": "array", "items": { "type": "string" } },
+            "steps": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "step": { "type": "number" },
+                  "instruction": { "type": "string" }
+                },
+                "required": ["step", "instruction"]
+              }
+            },
+            "tips": { "type": "string" }
+          },
+          "required": ["title", "description", "ingredients", "steps", "time_minutes", "servings", "calories_per_serving", "difficulty"]
+        }
+      }
+    };
+
     const requestPayload = {
       model: "qwen/qwen3-vl-30b-a3b-instruct", 
       messages: [
@@ -192,12 +157,31 @@ OUTPUT JSON format exactly as requested:
       ],
       max_tokens: 2000,
       temperature: 0.2,
-      response_format: { type: "json_object" }
+      response_format: recipeSchema
     };
+
+
+    // --- CACHE CHECK ---
+    if (videoUrl) {
+         const { data: cached } = await supabase
+            .from('ai_recipe_cache')
+            .select('recipe_json')
+            .eq('source_url', videoUrl)
+            .maybeSingle();
+
+         if (cached) {
+             console.log(`CACHE HIT for ${videoUrl}`);
+             return new Response(JSON.stringify({ success: true, data: cached.recipe_json }), {
+                headers: { 'Content-Type': 'application/json' }
+             });
+         }
+         console.log(`CACHE MISS for ${videoUrl}`);
+    }
+    // -------------------
 
     console.log("Sending to AI...");
 
-    // 4. Call Novita AI
+    // 5. Call Novita AI
     const aiRes = await fetch('https://api.novita.ai/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -210,46 +194,68 @@ OUTPUT JSON format exactly as requested:
     if (!aiRes.ok) {
         const errorText = await aiRes.text();
         console.error("AI API Error:", errorText);
-        throw new Error(`AI Provider Error: ${errorText}`);
+        return new Response(JSON.stringify({ 
+            success: false, 
+            error: `AI Provider Error (${aiRes.status})`,
+            details: errorText
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } });
     }
 
     const aiJson = await aiRes.json();
-    console.log("AI Response received");
-    
     const content = aiJson.choices[0].message.content;
 
-    // 5. Parse JSON
+    // 6. Parse JSON
     let recipeData;
     try {
-        // Clean up any markdown code blocks if present
-        const cleanJson = content.replace(/```json/g, '').replace(/```/g, '').trim();
-        recipeData = JSON.parse(cleanJson);
+        console.log("Raw AI Content Length:", content.length);
         
-        // Append source URL for reference
-        recipeData.sourceUrl = videoUrl;
-
-        // Try to capture a valid image URL for the thumbnail
-        const firstImage = finalMediaItems.find(i => i.type === 'image');
-        if (firstImage) {
-            recipeData.imageUrl = firstImage.url;
-        } else if (finalMediaItems.length > 0) {
-             // Fallback to whatever URL we have (e.g. video)
-             // The frontend might need to generate a thumbnail properly later
+        const firstOpen = content.indexOf('{');
+        const lastClose = content.lastIndexOf('}');
+        
+        if (firstOpen !== -1 && lastClose !== -1 && lastClose > firstOpen) {
+            const jsonStr = content.substring(firstOpen, lastClose + 1);
+            recipeData = JSON.parse(jsonStr);
+        } else {
+             const cleanJson = content.replace(/```json/g, '').replace(/```/g, '').trim();
+             recipeData = JSON.parse(cleanJson);
+        }
+        
+        // Use the first media item as the thumbnail if not provided
+        if (finalMediaItems.length > 0) {
              recipeData.imageUrl = finalMediaItems[0].url; 
         }
+        // Source URL
+        if(videoUrl) recipeData.sourceUrl = videoUrl;
+
     } catch (e) {
-        console.error("JSON Parse Error. Raw content:", content);
+        console.error("JSON Parse Error. Content snippet:", content.substring(0, 100));
         throw new Error("Failed to parse recipe from AI response");
     }
+
+
+    // --- CACHE SAVE ---
+    if (videoUrl && recipeData) {
+        // Run in background (don't await strictly to return faster)
+        supabase.from('ai_recipe_cache')
+            .insert({ source_url: videoUrl, recipe_json: recipeData })
+            .select().single()
+            .then(({ error }) => {
+                if(error) console.error("Cache Insert Error:", error);
+                else console.log("Cache Saved successfully");
+            });
+    }
+    // ------------------
 
     return new Response(JSON.stringify({ success: true, data: recipeData }), {
       headers: { 'Content-Type': 'application/json' }
     });
 
-    }
-catch (error: any) {
-    console.error("Function Error:", error);
-    return new Response(JSON.stringify({ success: false, error: error.message }), {
+  } catch (error: any) {
+    console.error("Generate Recipe Function Error:", error);
+    return new Response(JSON.stringify({ 
+        success: false, 
+        error: error.message,
+      }), {
       status: 500, headers: { 'Content-Type': 'application/json' }
     });
   }
