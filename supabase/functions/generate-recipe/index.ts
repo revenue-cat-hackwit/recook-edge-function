@@ -29,41 +29,53 @@ Deno.serve(async (req) => {
     })
 
     // 2. Parse Input
-    const { mediaItems, userPreferences, videoUrl } = await req.json() as RecipeRequest
+    const { mediaItems, userPreferences, videoUrl, title, description } = await req.json() as RecipeRequest & { title?: string, description?: string }
 
     // Validate Input
-    let finalMediaItems = mediaItems;
-    if (!finalMediaItems || finalMediaItems.length === 0) {
-        if (videoUrl) {
-            // Fallback: If user sent just a URL, treat it as a direct video link (assuming it was already processed or is direct)
-            finalMediaItems = [{ type: 'video', url: videoUrl }];
-        } else {
-            return new Response(JSON.stringify({ error: 'mediaItems or videoUrl is required' }), { status: 400 })
+    let finalMediaItems = mediaItems || [];
+    const isTextOnly = (!finalMediaItems || finalMediaItems.length === 0) && (!videoUrl);
+
+    if (isTextOnly) {
+        if (!title) {
+             return new Response(JSON.stringify({ error: 'Title is required for text-only generation' }), { status: 400 })
+        }
+    } else {
+         if (!finalMediaItems || finalMediaItems.length === 0) {
+            if (videoUrl) {
+                finalMediaItems = [{ type: 'video', url: videoUrl }];
+            }
         }
     }
 
-    console.log(`Processing recipe generation for ${finalMediaItems.length} items`);
+    console.log(`Processing recipe generation. Mode: ${isTextOnly ? 'Text-Only' : 'Multi-Modal'}`);
 
-    // 3. Prepare AI Request for Novita AI
+    // 3. Prepare AI Request
     const novitaApiKey = Deno.env.get('NOVITA_AI_API_KEY')
     if (!novitaApiKey) throw new Error('NOVITA_AI_API_KEY not configured');
+
+    // ... (User Context fetching remains same, skipping lines 51-88 in replacement if possible, but for clarity I will keep flow or assume context is fetched)
+    // To minimize replacement size, I will assume lines 51-88 are fine.
+    // However, I need to wrap the payload construction logic based on mode.
+
+    // ... User Context Logic (Keep existing lines 51-89) ... 
+    // I will replace from line 90 downwards to handle the branching.
 
     // 4. Fetch User Context from DB (Source of Truth)
     let dbPreferences: any = {};
     let dbPantry: any[] = [];
 
     const { data: { user } } = await supabase.auth.getUser();
+    
     if (user) {
-        // Fetch Profile
-        const { data: profile } = await supabase.from('profiles').select('allergies, diet_goal, equipment').eq('id', user.id).single();
-        if (profile) dbPreferences = profile;
+        const [profileRes, pantryRes] = await Promise.all([
+            supabase.from('profiles').select('allergies, diet_goal, equipment').eq('id', user.id).single(),
+            supabase.from('pantry_items').select('ingredient_name').eq('user_id', user.id)
+        ]);
 
-        // Fetch Pantry (Optional: Use ingredients from pantry)
-        const { data: pantry } = await supabase.from('pantry_items').select('ingredient_name').eq('user_id', user.id);
-        if (pantry) dbPantry = pantry; 
+        if (profileRes.data) dbPreferences = profileRes.data;
+        if (pantryRes.data) dbPantry = pantryRes.data;
     }
 
-    // Merge: DB takes precedence over client-side if available
     const finalPreferences = {
         allergies: dbPreferences.allergies || userPreferences?.allergies || [],
         dietGoal: dbPreferences.diet_goal || userPreferences?.dietGoal || '',
@@ -85,80 +97,79 @@ Deno.serve(async (req) => {
          prefsPrompt += `\nUser has these ingredients in PANTRY: ${pantryNames}. Try to use them if they fit the recipe.`;
     }
 
-    const systemPrompt = `You are "Pirinku Chef", an expert AI Chef. 
-Your task is to analyze the provided media (video or images) and generate a precise cooking recipe.
-Ignore non-food content.
-
+    let requestPayload;
+    
+    // --- MODE A: TEXT ONLY (Llama 3) ---
+    if (isTextOnly) {
+         const systemPrompt = `You are "Pirinku Chef", an expert AI Chef.
+Generate a detailed recipe based on the Title and Description provided.
 ${prefsPrompt}
 
-OUTPUT JSON format exactly as requested:
+OUTPUT JSON ONLY:
 {
-  "title": "", "description": "", "time_minutes": 0, "difficulty": "", 
-  "servings": 0, "calories_per_serving": 0, 
-  "ingredients": [], "tools": [], "steps": [{"step": 1, "instruction": ""}], "tips": ""
+  "title": "${title}", "description": "Extended description...", 
+  "time_minutes": Number, "difficulty": "String", 
+  "servings": Number, "calories_per_serving": Number,
+  "ingredients": ["String", "String"], 
+  "tools": ["String"], 
+  "steps": [{"step": 1, "instruction": "String"}], 
+  "tips": "String"
 }`;
 
-    // Construct Multi-Modal User Content
-    const userContent: any[] = [
-        { type: "text", text: `Create a detailed recipe from this content.` }
-    ];
+        requestPayload = {
+            model: "meta-llama/llama-3-70b-instruct",
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: `Recipe Title: ${title}\nDescription: ${description || 'No description'}` }
+            ],
+            max_tokens: 2000,
+            temperature: 0.4,
+            response_format: { type: "json_object" }
+        };
+    } 
+    // --- MODE B: MULTI-MODAL (Qwen-VL) ---
+    else {
+        const systemPrompt = `You are "Pirinku Chef", an expert AI Chef. 
+Your task is to analyze the provided media (video or images) and generate a precise cooking recipe.
+${prefsPrompt}
 
-    finalMediaItems.forEach(item => {
-        if (item.type === 'video') {
-            userContent.push({ type: "video_url", video_url: { url: item.url } });
-        } else {
-            userContent.push({ type: "image_url", image_url: { url: item.url } });
-        }
-    });
+OUTPUT JSON ONLY (No Markdown):
+{
+  "title": "String", "description": "String", 
+  "time_minutes": Number, "difficulty": "String", 
+  "servings": Number, "calories_per_serving": Number,
+  "ingredients": ["String", "String"], 
+  "tools": ["String"], 
+  "steps": [{"step": 1, "instruction": "String"}], 
+  "tips": "String"
+}`;
+        
+        const userContent: any[] = [
+            { type: "text", text: `Create a detailed recipe from this content.` }
+        ];
 
-    // 3. Define JSON Schema for Recipe
-    const recipeSchema = {
-      "type": "json_schema",
-      "json_schema": {
-        "name": "recipe_response",
-        "schema": {
-          "type": "object",
-          "properties": {
-            "title": { "type": "string" },
-            "description": { "type": "string" },
-            "time_minutes": { "type": "number", "description": "Total cooking time in minutes (number only)" },
-            "difficulty": { "type": "string", "enum": ["Easy", "Medium", "Hard"] },
-            "servings": { "type": "number" },
-            "calories_per_serving": { "type": "number", "description": "Calories count used number only, no text like kcal" },
-            "ingredients": { 
-              "type": "array", 
-              "items": { "type": "string" },
-              "description": "List of ingredients with quantities, e.g. '200g Chicken breast'"
-            },
-            "tools": { "type": "array", "items": { "type": "string" } },
-            "steps": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "step": { "type": "number" },
-                  "instruction": { "type": "string" }
-                },
-                "required": ["step", "instruction"]
-              }
-            },
-            "tips": { "type": "string" }
-          },
-          "required": ["title", "description", "ingredients", "steps", "time_minutes", "servings", "calories_per_serving", "difficulty"]
-        }
-      }
-    };
+        let videoUrlText = "";
+        finalMediaItems.forEach(item => {
+            if (item.type === 'video') {
+                videoUrlText += `\nVideo URL to analyze: ${item.url}`;
+            } else {
+                userContent.push({ type: "image_url", image_url: { url: item.url } });
+            }
+        });
 
-    const requestPayload = {
-      model: "qwen/qwen3-vl-30b-a3b-instruct", 
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userContent }
-      ],
-      max_tokens: 2000,
-      temperature: 0.2,
-      response_format: recipeSchema
-    };
+        if (videoUrlText) userContent[0].text += videoUrlText;
+
+        requestPayload = {
+            model: "qwen/qwen3-vl-30b-a3b-instruct", 
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: userContent }
+            ],
+            max_tokens: 2000,
+            temperature: 0.2,
+        };
+    }
+
 
 
     // --- CACHE CHECK ---

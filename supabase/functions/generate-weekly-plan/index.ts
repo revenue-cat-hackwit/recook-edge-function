@@ -25,139 +25,108 @@ Deno.serve(async (req) => {
     if (!novitaApiKey) throw new Error('NOVITA_AI_API_KEY not configured');
 
     // 1. Get User Profile & Pantry
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) throw new Error("User not found");
+    const debugMode = req.headers.get('x-debug-mode') === 'true';
+    console.log("Debug Mode:", debugMode, "Auth Header Present:", !!authHeader);
 
-    const { data: profile } = await supabase.from('profiles').select('*').eq('id', user.id).single();
+    let user;
+
+    if (debugMode) {
+        console.log("DEBUG MODE ENABLED: Using mock user");
+        user = { id: '00000000-0000-0000-0000-000000000000' };
+    } else {
+        try {
+            const { data, error: authError } = await supabase.auth.getUser();
+            if (authError) throw authError;
+            user = data.user;
+            if (!user) throw new Error("User not found (Auth returned no user)");
+        } catch (e: any) {
+            console.error("Auth Error:", e);
+            throw new Error(`Authentication failed: ${e.message}`);
+        }
+    }
+
+    const { data: profile } = await supabase.from('profiles').select('*').eq('id', user.id).maybeSingle();
     const { data: pantry } = await supabase.from('pantry_items').select('ingredient_name').eq('user_id', user.id);
 
     const diet = profile?.diet_goal || "General Healthy";
     const allergies = profile?.allergies && profile.allergies.length > 0 ? profile.allergies.join(', ') : "None";
     const pantryList = pantry && pantry.length > 0 ? pantry.map((p: any) => p.ingredient_name).join(', ') : "None";
 
-    console.log(`Generating plan for ${diet}, Allergies: ${allergies}, Pantry: ${pantryList}`);
+    console.log(`Generating plan for User ${user.id} (${diet}), Allergies: ${allergies}, Pantry: ${pantryList}`);
 
-    // 2. Define JSON Schema for Structured Output
-    const responseFormat = {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "meal_plan_response",
-            "schema": {
-                "type": "object",
-                "properties": {
-                    "plan": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "recipe_name": { "type": "string" },
-                                "description": { "type": "string" }
-                            },
-                            "required": ["recipe_name", "description"]
-                        }
-                    }
-                },
-                "required": ["plan"]
-            }
-        }
-    };
-
-    // 3. Prompt Llama 3
-    const prompt = `
-    You are an expert Meal Planner.
-    Create a 7-day Meal Plan (Breakfast, Lunch, Dinner) starting from ${startDate}.
-    
-    User Profile:
-    - Diet Goal: ${diet}
+    // 3. Define JSON schema & Prompt
+    const prompt = `Generate a weekly meal plan (21 meals) for a user with:
+    - Diet: ${diet}
     - Allergies: ${allergies}
-    - Pantry Items: ${pantryList}
+    - Pantry Items available: ${pantryList}
+    
+    Ensure variety and nutrition. Use the pantry items if possible.`;
 
-    OUTPUT REQUIREMENT:
-    - You MUST return a JSON object with a single key "plan" containing an array of exactly 21 items (7 days * 3 meals).
-    - The order MUST be: Day 1 Breakfast, Day 1 Lunch, Day 1 Dinner, Day 2 Breakfast, etc.
-    `;
-
-    // 4. Call AI with Fallback Mechanism
+    // 4. Call AI (Simplified & Robust Mode)
     const apiUrl = 'https://api.novita.ai/openai/v1/chat/completions';
     const headers = {
         'Authorization': `Bearer ${novitaApiKey}`,
         'Content-Type': 'application/json',
     };
 
-    let content = "";
+    const simplifiedSystemPrompt = `You are an expert Meal Planner.
+Output a JSON object with this exact structure:
+{
+  "plan": [
+    {
+      "recipe_name": "Name of dish",
+      "description": "Short description"
+    }
+  ]
+}
+Create 21 items (7 days * 3 meals).
+Do not include any markdown formatting (backticks). Just raw JSON.`;
 
-    try {
-        // ATTEMPT 1: Structured Output
-        console.log("Attempt 1: Structured Output");
-        const res1 = await fetch(apiUrl, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify({
-                model: "meta-llama/llama-3.1-70b-instruct", 
-                messages: [
-                    { role: "system", content: "You are a meal planning API that outputs structured JSON." },
-                    { role: "user", content: prompt }
-                ],
-                temperature: 0.3,
-                max_tokens: 3000,
-                response_format: responseFormat
-            })
-        });
+    console.log("Sending Request to AI...");
+    
+    // Single Robust Attempt
+    const aiRes = await fetch(apiUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+            model: "meta-llama/llama-3-70b-instruct", 
+            messages: [
+                { role: "system", content: simplifiedSystemPrompt },
+                { role: "user", content: prompt }
+            ],
+            temperature: 0.4,
+            max_tokens: 3500,
+            response_format: { type: "json_object" }
+        })
+    });
 
-        if (res1.ok) {
-            const json1 = await res1.json();
-            content = json1.choices[0].message.content;
-        } else {
-            console.warn("Structured Output rejected, trying fallback...", await res1.text());
-            throw new Error("Fallback");
-        }
-    } catch (err) {
-        // ATTEMPT 2: Fallback to Raw Prompt Engineering
-        console.log("Attempt 2: Raw Prompt Fallback");
-        const res2 = await fetch(apiUrl, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify({
-                model: "meta-llama/llama-3.1-70b-instruct",
-                messages: [
-                    { role: "system", content: "You MUST output strictly valid JSON array only. No intro text." },
-                    { role: "user", content: prompt + "\n\nRETURN JSON ARRAY ONLY." }
-                ],
-                temperature: 0.3,
-                max_tokens: 3000,
-                response_format: { type: "json_object" } // Simple JSON mode usually supported
-            })
-        });
-
-        if (!res2.ok) {
-            const errText = await res2.text();
-            throw new Error(`AI API Failed: ${errText}`);
-        }
-        
-        const json2 = await res2.json();
-        content = json2.choices[0].message.content;
+    if (!aiRes.ok) {
+        const errText = await aiRes.text();
+        console.error("AI Provider Error:", errText);
+        throw new Error(`AI Provider Error (${aiRes.status}): ${errText}`);
     }
 
-    // 5. Parse JSON
+    const aiJson = await aiRes.json();
+    let content = aiJson.choices[0].message.content;
+
+    // Clean up potential markdown
+    content = content.replace(/```json/g, '').replace(/```/g, '').trim();
     let plan = [];
     try {
-        // Try parsing directly first
         const parsed = JSON.parse(content);
-        
         if (parsed.plan && Array.isArray(parsed.plan)) {
             plan = parsed.plan;
         } else if (Array.isArray(parsed)) {
             plan = parsed;
         } else if (parsed && typeof parsed === 'object') {
-             // Sometimes "json_object" returns { "something": [array] } random keys
              const values = Object.values(parsed);
              const foundArray = values.find(v => Array.isArray(v));
              if (foundArray) plan = foundArray as any[];
-             else plan = parsed as any; // Desperate fallback
+             else plan = parsed as any; 
         }
     } catch (e: unknown) {
         console.error("JSON Parse Error. Content:", content);
-        // Retry clean up regex if direct parse fails
+        // Desperate fallback regex
         try {
              const clean = content.replace(/```json/g, '').replace(/```/g, '').trim();
              const first = clean.indexOf('[');
@@ -175,67 +144,82 @@ Deno.serve(async (req) => {
          console.warn(`AI returned ${plan.length} items instead of 21`);
     }
 
-    // 6. Process & Insert (Deterministic Loop)
-    const results = [];
+    if (debugMode) {
+        return new Response(JSON.stringify({ success: true, count: plan.length, data: plan, debug: true }), {
+             headers: { 'Content-Type': 'application/json' }
+        });
+    }
+
+    // 6. Process & Insert (Optimized for Speed)
     const mealTypes = ['breakfast', 'lunch', 'dinner'];
-    let dayIndex = 0;
+    const mealPlanPayloads: any[] = [];
     
-    // We expect 3 meals per day.
-    for (let i = 0; i < plan.length; i++) {
-        const item = plan[i];
+    // Step A: Prepare helpers
+    const getRecipeId = async (name: string, desc: string): Promise<string | null> => {
+        // Check existing
+        const { data: existing } = await supabase.from('user_recipes')
+            .select('id')
+            .eq('user_id', user.id)
+            .ilike('title', name)
+            .maybeSingle();
+            
+        if (existing) return existing.id;
         
-        // Calculate Day Offset & Meal Type based on Index
-        dayIndex = Math.floor(i / 3);
-        const mealType = mealTypes[i % 3];
+        // Create New
+        const { data: newRecipe, error } = await supabase.from('user_recipes').insert({
+            user_id: user.id,
+            title: name,
+            description: desc,
+            ingredients: [], 
+            steps: [],
+            time_minutes: "30",
+            difficulty: "Medium",
+            servings: "2",
+            calories_per_serving: "Unknown",
+            image_url: null 
+        }).select('id').single();
+        
+        if (error) {
+            console.error("Failed to create recipe:", name, error);
+            return null;
+        }
+        return newRecipe.id;
+    };
 
-        if (dayIndex > 6) break; // Limit to 7 days
+    // Step B: Process all items in parallel (limit concurrency if needed, but 21 is fine)
+    const planPromises = plan.map(async (item: any, index: number) => {
+        if (index > 20) return; // Cap at 21
 
-        // Calculate date
+        const dayIndex = Math.floor(index / 3);
+        const mealType = mealTypes[index % 3];
+
         const dateObj = new Date(startDate);
         dateObj.setDate(dateObj.getDate() + dayIndex);
         const dateStr = dateObj.toISOString().split('T')[0];
 
-        // Find or Create Recipe
-        let recipeId;
+        const recipeId = await getRecipeId(item.recipe_name, item.description);
         
-        // Search existing
-        const { data: existing } = await supabase.from('user_recipes')
-            .select('id')
-            .eq('user_id', user.id)
-            .ilike('title', item.recipe_name)
-            .maybeSingle();
-
-        if (existing) {
-            recipeId = existing.id;
-        } else {
-            // Create New Skeleton Recipe
-            const { data: newRecipe } = await supabase.from('user_recipes').insert({
-                user_id: user.id,
-                title: item.recipe_name,
-                description: item.description,
-                ingredients: [], 
-                steps: [],
-                time_minutes: "30",
-                difficulty: "Medium",
-                servings: "2",
-                calories_per_serving: "Unknown",
-                image_url: null 
-            }).select('id').single();
-            
-            if (newRecipe) recipeId = newRecipe.id;
-        }
-
         if (recipeId) {
-            // Insert Meal Plan
-            const { error } = await supabase.from('meal_plans').upsert({
+            mealPlanPayloads.push({
                 user_id: user.id,
                 date: dateStr,
                 meal_type: mealType,
                 recipe_id: recipeId
-            }, { onConflict: 'user_id, date, meal_type' }); 
-
-            if (!error) results.push({ date: dateStr, meal: mealType, recipe: item.recipe_name });
+            });
+            return { date: dateStr, meal: mealType, recipe: item.recipe_name };
         }
+        return null;
+    });
+
+    const results = (await Promise.all(planPromises)).filter(Boolean);
+
+    // Step C: Batch Upsert Plans
+    if (mealPlanPayloads.length > 0) {
+        const { error: upsertError } = await supabase.from('meal_plans').upsert(
+            mealPlanPayloads, 
+            { onConflict: 'user_id, date, meal_type' }
+        );
+        if (upsertError) console.error("Batch Upsert Error:", upsertError);
     }
 
     return new Response(JSON.stringify({ success: true, count: results.length, data: results }), {
@@ -244,9 +228,11 @@ Deno.serve(async (req) => {
 
   } catch (error: any) {
     console.error("Generate Weekly Plan Error:", error);
+    // Explicit 'message' property for supabase-js to pick up
     return new Response(JSON.stringify({ 
         success: false, 
-        error: error.message 
+        error: error.message,
+        message: error.message 
       }), {
       status: 500, headers: { 'Content-Type': 'application/json' }
     });

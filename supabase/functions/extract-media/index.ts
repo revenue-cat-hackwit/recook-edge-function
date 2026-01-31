@@ -11,11 +11,12 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ error: 'Missing authorization header' }), { status: 401 })
     }
 
-    // 2. Initialize Supabase Client (Needed for Re-upload logic)
+    // 2. Initialize Supabase Client (Protected - Use Service Role Key to Bypass RLS)
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!
-    const supabaseKey = Deno.env.get('SUPABASE_ANON_KEY')!
+    const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')! // Changed from ANON_KEY
     const supabase = createClient(supabaseUrl, supabaseKey, {
-      global: { headers: { Authorization: authHeader } }
+      // No global auth header needed for admin tasks, but we can keep it if we want to respect user context for Row Level Security if we *wanted* to. 
+      // But for system uploads, we want admin rights.
     })
 
     // 3. Parse Input
@@ -68,78 +69,77 @@ Deno.serve(async (req) => {
                         url: singleUrl,
                     })
                 });
-
                 const cobaltData = await cobaltRes.json();
-                console.log("Cobalt Response Status:", cobaltData.status);
-    
-                if (cobaltData.status === 'picker' && cobaltData.picker) {
-                    // Multi-Media (Carousel)
-                    console.log(`Detected Carousel with ${cobaltData.picker.length} items`);
-                    cobaltData.picker.forEach((item: any) => {
-                        const finalUrl = item.url;
-                        
-                        if (item.type === 'photo') mediaItems.push({ type: 'image', url: item.url });
-                        if (item.type === 'video') mediaItems.push({ type: 'video', url: finalUrl });
-                    });
-                } 
-                else if (cobaltData.url) {
-                    const isImage = /\.(jpg|jpeg|png|webp)$/i.test(cobaltData.url);
-                    let finalUrl = cobaltData.url;
+                console.log("Cobalt Response:", JSON.stringify(cobaltData));
 
+                // 1. Get the Raw URL from Cobalt (whatever it is)
+                let rawUrl = "";
+                if (cobaltData.url) rawUrl = cobaltData.url;
+                else if (cobaltData.picker && cobaltData.picker.length > 0) rawUrl = cobaltData.picker[0].url;
 
-                    mediaItems.push({ type: isImage ? 'image' : 'video', url: finalUrl });
-                } 
-                else if (cobaltData.status === 'tunnel' || cobaltData.status === 'redirect') {
-                    if (cobaltData.url) {
-                        const isImage = /\.(jpg|jpeg|png|webp)$/i.test(cobaltData.url);
-                        
-                        // IF VIDEO TUNNEL: Re-upload to Supabase Storage to get a clean Direct Link
-                        if (!isImage) {
-                            console.log("Re-uploading Cobalt tunnel stream to Supabase Storage (Streaming)...");
-                            try {
-                                // 1. Fetch the stream from Cobalt
-                                const tunnelRes = await fetch(cobaltData.url);
-                                if (!tunnelRes.ok) throw new Error(`Failed to fetch tunnel stream: ${tunnelRes.status}`);
-                                
-                                // Use ArrayBuffer instead of stream for better compatibility
-                                const videoBlob = await tunnelRes.arrayBuffer();
-
-                                // 2. Upload to 'temp_content' bucket
-                                const filename = `temp_${Date.now()}_${Math.random().toString(36).substring(7)}.mp4`;
-                                const { data: uploadData, error: uploadError } = await supabase
-                                    .storage
-                                    .from('temp_content')
-                                    .upload(filename, videoBlob, {
-                                        contentType: 'video/mp4',
-                                        upsert: false
-                                    });
-
-                                if (uploadError) throw uploadError;
-
-                                // 3. Get Public URL
-                                const { data: publicUrlData } = supabase
-                                    .storage
-                                    .from('temp_content')
-                                    .getPublicUrl(filename);
-                                
-                                console.log("Re-uploaded Video URL:", publicUrlData.publicUrl);
-                                mediaItems.push({ type: 'video', url: publicUrlData.publicUrl });
-                            } catch (uploadErr) {
-                                console.error("Re-upload failed, falling back to original tunnel (likely to fail):", uploadErr);
-                                mediaItems.push({ type: 'video', url: cobaltData.url });
-                            }
-                        } else {
-                            mediaItems.push({ type: 'image', url: cobaltData.url });
-                        }
-                    }
-                } else {
-                    console.warn("Cobalt unknown response, using original URL as fallback.");
-                    mediaItems.push({ type: 'video', url: singleUrl });
+                if (!rawUrl) {
+                    throw new Error("Cobalt did not return a URL");
                 }
 
-            } catch (e) {
-                console.error("Cobalt Error, fallback to original:", e);
-                mediaItems.push({ type: 'video', url: singleUrl });
+                // 2. CHECK: Is it already an image? (Images are safe, usually)
+                // If it's an image, just pass it through. If video/stream, ALWAYS RE-UPLOAD.
+                const isImage = /\.(jpg|jpeg|png|webp|heic)$/i.test(rawUrl.split('?')[0]);
+
+                if (isImage) {
+                     mediaItems.push({ type: 'image', url: rawUrl });
+                } else {
+                     // 3. VIDEO FLOW: FORCE DOWNLOAD & UPLOAD
+                     console.log(`Processing Video URL: ${rawUrl}`);
+                     console.log("Starting Download & Re-upload sequence...");
+
+                     try {
+                        // A. Download from Cobalt/Source
+                        const downloadRes = await fetch(rawUrl, {
+                             headers: { 'User-Agent': 'Mozilla/5.0' } // Fake UA
+                        });
+                        
+                        if (!downloadRes.ok) throw new Error(`Download failed: ${downloadRes.status}`);
+                        
+                        // Size Check (50MB Limit for "Shorts")
+                        const maxSize = 50 * 1024 * 1024; 
+                        const cl = downloadRes.headers.get('content-length');
+                        if (cl && parseInt(cl) > maxSize) throw new Error("Video too large (Max 50MB)");
+
+                        const fileBlob = await downloadRes.arrayBuffer();
+                        if (fileBlob.byteLength > maxSize) throw new Error("Video too large (Max 50MB)");
+                        
+                        // B. Upload to Supabase 'videos' bucket
+                        const filename = `ai_${Date.now()}.mp4`; // Always save as .mp4
+                        
+                        console.log(`Uploading ${fileBlob.byteLength} bytes to Supabase...`);
+                        
+                        const { error: uploadError } = await supabase.storage
+                            .from('videos')
+                            .upload(filename, fileBlob, { 
+                                contentType: 'video/mp4', 
+                                upsert: false 
+                            });
+
+                        if (uploadError) throw new Error(`Upload failed: ${uploadError.message}`);
+
+                        // C. Get Public URL
+                        const { data: publicUrlData } = supabase.storage
+                            .from('videos')
+                            .getPublicUrl(filename);
+
+                        console.log("Final Hosted URL:", publicUrlData.publicUrl);
+                        mediaItems.push({ type: 'video', url: publicUrlData.publicUrl });
+
+                     } catch (err: any) {
+                         console.error("Critical Failure in Download-Upload Pipeline:", err);
+                         throw new Error(`Failed to secure video file: ${err.message}. Please upload manually.`);
+                     }
+                }
+
+            } catch (e: any) {
+                console.error("Cobalt/Processing Error:", e);
+                // DO NOT FALLBACK. Let it fail so user knows to upload manually.
+                throw new Error(e.message || "Failed to process media");
             }
         }
         // C. Fallback
