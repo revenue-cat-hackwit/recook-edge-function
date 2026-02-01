@@ -1,7 +1,7 @@
 // AI Assistant with Novita AI (Qwen3-VL-30B)
 // Unified multimodal AI function supporting text chat and image analysis
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
-import { createClient } from 'jsr:@supabase/supabase-js@2'
+import { createClient } from '@supabase/supabase-js'
 
 console.log("AI Assistant function initialized")
 
@@ -102,7 +102,7 @@ Deno.serve(async (req) => {
         .order('expiry_date', { ascending: true }); // Use expiring first
 
     // 3. Build Context String
-    let systemContext = "You are Chef Pirinku, an expert cooking assistant. Be helpful, concise, and friendly.";
+    let systemContext = "You are Chef Pirinku, an expert cooking assistant. Be helpful, concise, and friendly. You MUST communicate in English.";
     
     if (profile) {
         if (profile.diet_goal) systemContext += `\nUser's Goal: ${profile.diet_goal}.`;
