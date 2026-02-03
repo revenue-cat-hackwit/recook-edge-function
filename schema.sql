@@ -17,8 +17,9 @@ CREATE TABLE IF NOT EXISTS profiles (
   
   -- Preferences (New)
   allergies TEXT[],
-  diet_goal TEXT,
   equipment TEXT[],
+  cuisines TEXT[], -- Preferred cuisines (Indonesian, Italian, etc.)
+  taste_preferences TEXT[], -- What to avoid (Too Spicy, Too Sweet, etc.)
   
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -50,7 +51,7 @@ CREATE TABLE IF NOT EXISTS user_recipes (
   user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
   title TEXT NOT NULL,
   description TEXT,
-  ingredients JSONB NOT NULL, -- ["Item 1", "Item 2"]
+  ingredients JSONB NOT NULL, -- [{item: "Chicken", quantity: 200, unit: "g"}]
   steps JSONB NOT NULL,       -- [{step: 1, instruction: "..."}]
   time_minutes TEXT,
   difficulty TEXT,

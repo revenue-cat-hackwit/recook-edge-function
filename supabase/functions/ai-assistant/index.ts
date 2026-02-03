@@ -90,7 +90,7 @@ Deno.serve(async (req) => {
     // 1. Fetch Profile (Preferences)
     const { data: profile } = await supabase
         .from('profiles')
-        .select('allergies, diet_goal, equipment')
+        .select('allergies, equipment, cuisines, taste_preferences')
         .eq('id', user?.id)
         .single();
     
@@ -101,13 +101,54 @@ Deno.serve(async (req) => {
         .eq('user_id', user?.id)
         .order('expiry_date', { ascending: true }); // Use expiring first
 
-    // 3. Build Context String
-    let systemContext = "You are Chef Pirinku, an expert cooking assistant. Be helpful, concise, and friendly. You MUST communicate in English.";
+    // 3. Fetch Shopping List
+    const { data: shoppingList } = await supabase
+        .from('shopping_list_items')
+        .select('name, quantity, unit, is_checked, from_recipe')
+        .eq('user_id', user?.id)
+        .order('created_at', { ascending: false });
+
+    // 4. Fetch Meal Plans (current week)
+    const today = new Date();
+    const startOfWeek = new Date(today);
+    startOfWeek.setDate(today.getDate() - today.getDay()); // Sunday
+    const endOfWeek = new Date(startOfWeek);
+    endOfWeek.setDate(startOfWeek.getDate() + 6); // Saturday
+
+    const { data: mealPlans } = await supabase
+        .from('meal_plans')
+        .select(`
+            date,
+            meal_type,
+            recipe:recipe_id (
+                title,
+                ingredients,
+                servings
+            )
+        `)
+        .eq('user_id', user?.id)
+        .gte('date', startOfWeek.toISOString().split('T')[0])
+        .lte('date', endOfWeek.toISOString().split('T')[0])
+        .order('date', { ascending: true });
+
+    // 5. Build Context String
+    let systemContext = `You are Chef Pirinku, an expert cooking assistant. Be helpful, concise, and friendly. You MUST communicate in English.
+
+CAPABILITIES:
+- Help users manage their pantry inventory
+- Suggest recipes based on available ingredients
+- Assist with shopping list planning
+- Help with meal planning and weekly organization
+- Provide cooking tips and substitutions
+- Answer dietary and nutrition questions
+- Suggest what to cook based on meal plans and available ingredients`;
+    
     
     if (profile) {
-        if (profile.diet_goal) systemContext += `\nUser's Goal: ${profile.diet_goal}.`;
         if (profile.allergies && profile.allergies.length > 0) systemContext += `\nALLERGIES (CRITICAL): ${profile.allergies.join(', ')}.`;
         if (profile.equipment && profile.equipment.length > 0) systemContext += `\nKitchen Tools: ${profile.equipment.join(', ')}.`;
+        if (profile.cuisines && profile.cuisines.length > 0) systemContext += `\nPreferred Cuisines: ${profile.cuisines.join(', ')}.`;
+        if (profile.taste_preferences && profile.taste_preferences.length > 0) systemContext += `\nTaste Preferences to AVOID: ${profile.taste_preferences.join(', ')}.`;
     }
 
     if (pantry && pantry.length > 0) {
@@ -117,6 +158,42 @@ Deno.serve(async (req) => {
         systemContext += `\n\n[USER PANTRY INVENTORY - USE THESE INGREDIENTS IF POSSIBLE]:\n${ingredients}`;
     } else {
          systemContext += `\n\n[User Pantry is Empty]`;
+    }
+
+    if (shoppingList && shoppingList.length > 0) {
+        const uncheckedItems = shoppingList.filter((item: any) => !item.is_checked);
+        if (uncheckedItems.length > 0) {
+            const items = uncheckedItems.map((item: any) => {
+                const qtyUnit = item.quantity && item.unit ? `${item.quantity} ${item.unit}` : '';
+                const recipe = item.from_recipe ? `(from ${item.from_recipe})` : '';
+                return `- ${item.name} ${qtyUnit} ${recipe}`.trim();
+            }).join('\n');
+            systemContext += `\n\n[USER SHOPPING LIST - ${uncheckedItems.length} ITEMS PENDING]:\n${items}`;
+        }
+    }
+
+    if (mealPlans && mealPlans.length > 0) {
+        const daysOfWeek = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+        const mealsByDay = new Map<string, any[]>();
+        
+        mealPlans.forEach((plan: any) => {
+            const date = new Date(plan.date);
+            const dayName = daysOfWeek[date.getDay()];
+            if (!mealsByDay.has(dayName)) mealsByDay.set(dayName, []);
+            mealsByDay.get(dayName)?.push(plan);
+        });
+
+        let mealPlanText = '';
+        mealsByDay.forEach((meals, day) => {
+            mealPlanText += `\n${day}:`;
+            meals.forEach((meal: any) => {
+                const mealType = meal.meal_type.charAt(0).toUpperCase() + meal.meal_type.slice(1);
+                const recipeName = meal.recipe?.title || 'No recipe';
+                mealPlanText += `\n  - ${mealType}: ${recipeName}`;
+            });
+        });
+
+        systemContext += `\n\n[USER MEAL PLAN - THIS WEEK]:${mealPlanText}`;
     }
 
     // Parse request body
@@ -261,7 +338,7 @@ Deno.serve(async (req) => {
     --data '{
       "messages": [
         { "role": "system", "content": "You are a helpful assistant for Pirinku app." },
-        { "role": "user", "content": "What is Pirinku?" }
+        { "role": "user", "content": "What is Recook?" }
       ],
       "max_tokens": 500,
       "temperature": 0.7

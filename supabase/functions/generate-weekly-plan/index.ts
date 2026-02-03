@@ -10,7 +10,7 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ error: 'Missing authorization header' }), { status: 401 })
     }
 
-    const { startDate } = await req.json()
+    const { startDate, generationMode } = await req.json()
     if (!startDate) {
         return new Response(JSON.stringify({ error: 'startDate is required' }), { status: 400 })
     }
@@ -33,9 +33,31 @@ Deno.serve(async (req) => {
 
     const diet = profile?.diet_goal || "General Healthy";
     const allergies = profile?.allergies && profile.allergies.length > 0 ? profile.allergies.join(', ') : "None";
-    const pantryList = pantry && pantry.length > 0 ? pantry.map((p: any) => p.ingredient_name).join(', ') : "None";
+    const pantryList = pantry && pantry.length > 0 ? pantry.map((p: { ingredient_name: string }) => p.ingredient_name).join(', ') : "None";
 
-    console.log(`Generating plan for ${diet}, Allergies: ${allergies}, Pantry: ${pantryList}`);
+    console.log(`Generating plan for ${diet}, Allergies: ${allergies}, Pantry: ${pantryList}, Mode: ${generationMode || 'replace'}`);
+
+    // 1.5. If mode is 'fill', get existing meal plans to skip those slots
+    const existingSlots = new Set<string>();
+    if (generationMode === 'fill') {
+        const endDate = new Date(startDate);
+        endDate.setDate(endDate.getDate() + 6);
+        const endDateStr = endDate.toISOString().split('T')[0];
+        
+        const { data: existing } = await supabase
+            .from('meal_plans')
+            .select('date, meal_type')
+            .eq('user_id', user.id)
+            .gte('date', startDate)
+            .lte('date', endDateStr);
+        
+        if (existing) {
+            existing.forEach((slot: { date: string; meal_type: string }) => {
+                existingSlots.add(`${slot.date}_${slot.meal_type}`);
+            });
+        }
+        console.log(`Fill mode: Found ${existingSlots.size} existing slots to skip`);
+    }
 
     // 2. Define JSON Schema for Structured Output
     const responseFormat = {
@@ -111,7 +133,7 @@ Deno.serve(async (req) => {
             console.warn("Structured Output rejected, trying fallback...", await res1.text());
             throw new Error("Fallback");
         }
-    } catch (err) {
+    } catch (_err) {
         // ATTEMPT 2: Fallback to Raw Prompt Engineering
         console.log("Attempt 2: Raw Prompt Fallback");
         const res2 = await fetch(apiUrl, {
@@ -165,7 +187,7 @@ Deno.serve(async (req) => {
              if (first !== -1 && last !== -1) {
                 plan = JSON.parse(clean.substring(first, last + 1));
              }
-        } catch (e2) {
+        } catch (_e2) {
              const msg = e instanceof Error ? e.message : 'Unknown error';
              throw new Error(`Failed to parse meal plan: ${msg}`);
         }
@@ -194,6 +216,13 @@ Deno.serve(async (req) => {
         const dateObj = new Date(startDate);
         dateObj.setDate(dateObj.getDate() + dayIndex);
         const dateStr = dateObj.toISOString().split('T')[0];
+
+        // Check if this slot should be skipped (fill mode only)
+        const slotKey = `${dateStr}_${mealType}`;
+        if (generationMode === 'fill' && existingSlots.has(slotKey)) {
+            console.log(`Skipping existing slot: ${slotKey}`);
+            continue;
+        }
 
         // Find or Create Recipe
         let recipeId;
@@ -226,15 +255,27 @@ Deno.serve(async (req) => {
         }
 
         if (recipeId) {
-            // Insert Meal Plan
-            const { error } = await supabase.from('meal_plans').upsert({
-                user_id: user.id,
-                date: dateStr,
-                meal_type: mealType,
-                recipe_id: recipeId
-            }, { onConflict: 'user_id, date, meal_type' }); 
+            // Insert Meal Plan - use upsert for replace mode, insert for fill mode
+            if (generationMode === 'fill') {
+                // Fill mode: only insert if slot doesn't exist (already checked above)
+                const { error } = await supabase.from('meal_plans').insert({
+                    user_id: user.id,
+                    date: dateStr,
+                    meal_type: mealType,
+                    recipe_id: recipeId
+                });
+                if (!error) results.push({ date: dateStr, meal: mealType, recipe: item.recipe_name });
+            } else {
+                // Replace mode: upsert to replace existing
+                const { error } = await supabase.from('meal_plans').upsert({
+                    user_id: user.id,
+                    date: dateStr,
+                    meal_type: mealType,
+                    recipe_id: recipeId
+                }, { onConflict: 'user_id, date, meal_type' }); 
 
-            if (!error) results.push({ date: dateStr, meal: mealType, recipe: item.recipe_name });
+                if (!error) results.push({ date: dateStr, meal: mealType, recipe: item.recipe_name });
+            }
         }
     }
 
@@ -242,11 +283,12 @@ Deno.serve(async (req) => {
       headers: { 'Content-Type': 'application/json' }
     });
 
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
     console.error("Generate Weekly Plan Error:", error);
     return new Response(JSON.stringify({ 
         success: false, 
-        error: error.message 
+        error: errorMessage 
       }), {
       status: 500, headers: { 'Content-Type': 'application/json' }
     });

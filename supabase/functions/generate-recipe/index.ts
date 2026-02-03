@@ -85,9 +85,14 @@ Deno.serve(async (req) => {
          prefsPrompt += `\nUser has these ingredients in PANTRY: ${pantryNames}. Try to use them if they fit the recipe.`;
     }
 
-    const systemPrompt = `You are "Pirinku Chef", an expert AI Chef. 
+    const systemPrompt = `You are "Recook Chef", an expert AI Chef. 
 Your task is to analyze the provided media (video or images) and generate a precise cooking recipe.
-Ignore non-food content.
+
+CRITICAL VALIDATION:
+1. First, check if the content shows FOOD, COOKING, or INGREDIENTS.
+2. If the content does NOT contain food/cooking (e.g., people, landscapes, objects, animals, etc.), you MUST respond with ONLY this exact JSON:
+   {"error": "no_food_detected", "message": "This image/video does not appear to contain food or cooking content."}
+3. If content IS food-related, proceed with recipe generation.
 
 ${prefsPrompt}
 
@@ -127,8 +132,16 @@ OUTPUT JSON format exactly as requested:
             "calories_per_serving": { "type": "number", "description": "Calories count used number only, no text like kcal" },
             "ingredients": { 
               "type": "array", 
-              "items": { "type": "string" },
-              "description": "List of ingredients with quantities, e.g. '200g Chicken breast'"
+              "items": { 
+                "type": "object",
+                "properties": {
+                  "item": { "type": "string", "description": "Ingredient name, e.g. 'Chicken breast'" },
+                  "quantity": { "type": ["number", "string"], "description": "Amount needed, e.g. 200 or '1/2'" },
+                  "unit": { "type": "string", "description": "Unit of measurement, e.g. 'g', 'ml', 'cup', 'pcs', 'tbsp'" }
+                },
+                "required": ["item", "quantity", "unit"]
+              },
+              "description": "List of ingredients as structured objects with item name, quantity, and unit"
             },
             "tools": { "type": "array", "items": { "type": "string" } },
             "steps": {
@@ -218,6 +231,18 @@ OUTPUT JSON format exactly as requested:
         } else {
              const cleanJson = content.replace(/```json/g, '').replace(/```/g, '').trim();
              recipeData = JSON.parse(cleanJson);
+        }
+
+        // Check if AI detected non-food content
+        if (recipeData.error === 'no_food_detected') {
+            return new Response(JSON.stringify({ 
+                success: false, 
+                error: 'No food content detected',
+                message: recipeData.message || 'The provided image/video does not appear to contain food or cooking content. Please upload a food-related image or video.'
+            }), { 
+                status: 400, 
+                headers: { 'Content-Type': 'application/json' } 
+            });
         }
         
         // Use the first media item as the thumbnail if not provided

@@ -120,8 +120,8 @@ Deno.serve(async (req) => {
     // --- STEP 3: BRAIN (LLM) ---
     console.log(`[LLM] Thinking...`)
     const baseSystemPrompt = language === 'en' 
-        ? 'You are Chef Pirinku, a friendly cooking assistant. Answer briefly, concisely, and conversationally (spoken style). Max 2-3 sentences. Do not use markdown (* or #).'
-        : 'Kamu adalah Chef Pirinku yang ramah dan asik. Jawablah dengan singkat, padat, dan seperti berbicara lisan (conversational). Maksimal 2-3 kalimat. Jangan gunakan markdown (* atau #).';
+        ? 'You are Chef Recook, a friendly cooking assistant. Answer briefly, concisely, and conversationally (spoken style). Max 2-3 sentences. Do not use markdown (* or #).'
+        : 'Kamu adalah Chef Recook yang ramah dan asik. Jawablah dengan singkat, padat, dan seperti berbicara lisan (conversational). Maksimal 2-3 kalimat. Jangan gunakan markdown (* atau #).';
     
     const systemPrompt = `${baseSystemPrompt} ${userContext}`;
 

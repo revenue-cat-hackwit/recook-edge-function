@@ -6,93 +6,97 @@ const NOVITA_API_KEY = Deno.env.get('NOVITA_AI_API_KEY');
 
 Deno.serve(async (req) => {
   try {
-    const authHeader = req.headers.get('Authorization')
-    if (!authHeader) return new Response(JSON.stringify({ error: 'Missing auth header' }), { status: 401 })
-
     if (!NOVITA_API_KEY) return new Response(JSON.stringify({ error: 'Server Config Error' }), { status: 500 })
 
     const { imageUrl } = await req.json();
     if (!imageUrl) return new Response(JSON.stringify({ error: 'imageUrl is required' }), { status: 400 })
 
-    const systemPrompt = `
-      You are an AI Pantry Assistant.
-      Identify all food items in the image (fridge, table, or grocery receipt).
-      For each item, estimate:
-      - Name (singular, e.g. "Egg", "Milk")
-      - Quantity (e.g. "12 pcs", "1 liter", "About 500g")
-      - Category ("Produce", "Dairy", "Meat", "Grains", "Other")
-      - Expiry Estimation (YYYY-MM-DD from today, guess based on food type. e.g. Milk = +7 days, Vegetables = +5 days).
+    const systemPrompt = `You are an AI Pantry Assistant.
+Analyze the image and identify ALL food items visible.
 
-      OUTPUT: JSON Array only.
-      Example: [{"name": "Milk", "quantity": "1L", "category": "Dairy", "expiry_date": "2024-01-01"}]
-    `;
+CRITICAL VALIDATION:
+1. First, check if the image contains FOOD ITEMS or INGREDIENTS.
+2. If the image does NOT contain food (e.g., people, landscapes, objects, pets, etc.), respond with an EMPTY array: []
+3. If food items ARE present, list them with name and quantity.
 
-    // Define JSON Schema
-    const pantrySchema = {
-      "type": "json_schema",
-      "json_schema": {
-        "name": "pantry_response",
-        "schema": {
-          "type": "object",
-          "properties": {
-            "items": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "name": { "type": "string" },
-                  "quantity": { "type": "string" },
-                  "category": { "type": "string", "enum": ["Produce", "Dairy", "Meat", "Grains", "Snacks", "Beverage", "Other"] },
-                  "expiry_date": { "type": "string", "description": "ISO Date YYYY-MM-DD" }
-                },
-                "required": ["name", "quantity", "category", "expiry_date"]
-              }
-            }
-          },
-          "required": ["items"]
-        }
-      }
+For each item, provide: name and estimated quantity.
+
+CRITICAL: You MUST respond with ONLY a valid JSON array. No other text.
+Format: [{"name": "Item Name", "quantity": "estimated amount"}]
+Example: [{"name": "Tomato", "quantity": "5 pcs"}, {"name": "Milk", "quantity": "1 liter"}]
+If NO food detected: []`;
+
+    const requestPayload = {
+      model: "qwen/qwen3-vl-30b-a3b-instruct",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: [
+            { type: "text", text: "List all food items in this image as JSON array." },
+            { type: "image_url", image_url: { url: imageUrl } }
+        ]}
+      ],
+      max_tokens: 1000,
+      temperature: 0.1
     };
 
+    console.log("Sending to AI...");
+
     const aiRes = await fetch('https://api.novita.ai/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-            'Authorization': `Bearer ${NOVITA_API_KEY}`,
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-            model: "qwen/qwen3-vl-30b-a3b-instruct",
-            messages: [
-                { role: "system", content: systemPrompt },
-                { role: "user", content: [
-                    { type: "text", text: "Analyze this image and list the food items." },
-                    { type: "image_url", image_url: { url: imageUrl } }
-                ]}
-            ],
-            max_tokens: 2000,
-            temperature: 0.1,
-            response_format: pantrySchema
-        })
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${NOVITA_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(requestPayload)
     });
 
-    if (!aiRes.ok) throw new Error(await aiRes.text());
-    
+    if (!aiRes.ok) {
+        const errorText = await aiRes.text();
+        console.error("AI API Error:", errorText);
+        return new Response(JSON.stringify({ 
+            success: false, 
+            error: `AI Provider Error (${aiRes.status})`,
+            details: errorText
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+    }
+
     const aiJson = await aiRes.json();
     const content = aiJson.choices[0].message.content;
 
+    // Parse JSON
     let items = [];
     try {
-        const clean = content.replace(/```json/g, '').replace(/```/g, '').trim();
-        const first = clean.indexOf('[');
-        const last = clean.lastIndexOf(']');
-        if (first !== -1 && last !== -1) {
-            items = JSON.parse(clean.substring(first, last + 1));
+        console.log("Raw AI Content Length:", content.length);
+        
+        const firstOpen = content.indexOf('[');
+        const lastClose = content.lastIndexOf(']');
+        
+        if (firstOpen !== -1 && lastClose !== -1 && lastClose > firstOpen) {
+            const jsonStr = content.substring(firstOpen, lastClose + 1);
+            items = JSON.parse(jsonStr);
         } else {
-             items = JSON.parse(clean);
+             const cleanJson = content.replace(/```json/g, '').replace(/```/g, '').trim();
+             items = JSON.parse(cleanJson);
         }
+
+        // Ensure array
+        if (!Array.isArray(items)) items = [];
+
+        // If empty array, it means no food was detected
+        if (items.length === 0) {
+            return new Response(JSON.stringify({ 
+                success: false, 
+                error: 'No food items detected',
+                message: 'The image does not appear to contain any food items. Please upload a clear photo of your pantry, fridge, or food ingredients.'
+            }), { 
+                status: 400, 
+                headers: { 'Content-Type': 'application/json' } 
+            });
+        }
+
     } catch (e) {
-        console.error("JSON Parse Error", content);
-        throw new Error("Failed to parse pantry items");
+        console.error("JSON Parse Error. Content snippet:", content.substring(0, 100));
+        throw new Error("Failed to parse pantry items from AI response");
     }
 
     return new Response(JSON.stringify({ success: true, data: items }), {
