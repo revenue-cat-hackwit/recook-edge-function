@@ -4,7 +4,7 @@ import { createClient } from 'jsr:@supabase/supabase-js@2'
 console.log("Generate Recipe function initialized (AI Mode Only)")
 
 interface RecipeRequest {
-  mediaItems: { type: 'video' | 'image', url: string }[]
+  mediaItems?: { type: 'video' | 'image', url: string }[]
   userPreferences?: {
     allergies: string[];
     dietGoal: string;
@@ -12,6 +12,9 @@ interface RecipeRequest {
   }
   // Optional: Backwards compatibility or single URL pass-through
   videoUrl?: string
+  // Text-only mode: generate from title/description
+  title?: string
+  description?: string
 }
 
 Deno.serve(async (req) => {
@@ -29,20 +32,26 @@ Deno.serve(async (req) => {
     })
 
     // 2. Parse Input
-    const { mediaItems, userPreferences, videoUrl } = await req.json() as RecipeRequest
+    const { mediaItems, userPreferences, videoUrl, title, description } = await req.json() as RecipeRequest
+
+    // Detect if this is text-only mode (no media, just title/description)
+    const isTextOnlyMode = !mediaItems && !videoUrl && title;
 
     // Validate Input
     let finalMediaItems = mediaItems;
-    if (!finalMediaItems || finalMediaItems.length === 0) {
-        if (videoUrl) {
-            // Fallback: If user sent just a URL, treat it as a direct video link (assuming it was already processed or is direct)
-            finalMediaItems = [{ type: 'video', url: videoUrl }];
-        } else {
-            return new Response(JSON.stringify({ error: 'mediaItems or videoUrl is required' }), { status: 400 })
-        }
+    if (!isTextOnlyMode) {
+      if (!finalMediaItems || finalMediaItems.length === 0) {
+          if (videoUrl) {
+              // Fallback: If user sent just a URL, treat it as a direct video link (assuming it was already processed or is direct)
+              finalMediaItems = [{ type: 'video', url: videoUrl }];
+          } else {
+              return new Response(JSON.stringify({ error: 'mediaItems or videoUrl is required' }), { status: 400 })
+          }
+      }
+      console.log(`Processing recipe generation for ${finalMediaItems.length} items`);
+    } else {
+      console.log(`Processing text-only recipe generation for: "${title}"`);
     }
-
-    console.log(`Processing recipe generation for ${finalMediaItems.length} items`);
 
     // 3. Prepare AI Request for Novita AI
     const novitaApiKey = Deno.env.get('NOVITA_AI_API_KEY')
@@ -85,7 +94,19 @@ Deno.serve(async (req) => {
          prefsPrompt += `\nUser has these ingredients in PANTRY: ${pantryNames}. Try to use them if they fit the recipe.`;
     }
 
-    const systemPrompt = `You are "Recook Chef", an expert AI Chef. 
+    const systemPrompt = isTextOnlyMode 
+      ? `You are "Recook Chef", an expert AI Chef. 
+Your task is to create a detailed, complete cooking recipe based on the provided title and description.
+
+${prefsPrompt}
+
+OUTPUT JSON format exactly as requested:
+{
+  "title": "", "description": "", "time_minutes": 0, "difficulty": "", 
+  "servings": 0, "calories_per_serving": 0, 
+  "ingredients": [], "tools": [], "steps": [{"step": 1, "instruction": ""}], "tips": ""
+}`
+      : `You are "Recook Chef", an expert AI Chef. 
 Your task is to analyze the provided media (video or images) and generate a precise cooking recipe.
 
 CRITICAL VALIDATION:
@@ -103,18 +124,23 @@ OUTPUT JSON format exactly as requested:
   "ingredients": [], "tools": [], "steps": [{"step": 1, "instruction": ""}], "tips": ""
 }`;
 
-    // Construct Multi-Modal User Content
-    const userContent: any[] = [
-        { type: "text", text: `Create a detailed recipe from this content.` }
-    ];
+    // Construct Multi-Modal User Content or Text-Only Content
+    const userContent: any[] = isTextOnlyMode
+      ? [{ 
+          type: "text", 
+          text: `Create a complete recipe for: "${title}"${description ? `\nDescription: ${description}` : ''}\n\nGenerate detailed ingredients with quantities/units and step-by-step cooking instructions.` 
+        }]
+      : [{ type: "text", text: `Create a detailed recipe from this content.` }];
 
-    finalMediaItems.forEach(item => {
-        if (item.type === 'video') {
-            userContent.push({ type: "video_url", video_url: { url: item.url } });
-        } else {
-            userContent.push({ type: "image_url", image_url: { url: item.url } });
-        }
-    });
+    if (!isTextOnlyMode && finalMediaItems) {
+      finalMediaItems.forEach(item => {
+          if (item.type === 'video') {
+              userContent.push({ type: "video_url", video_url: { url: item.url } });
+          } else {
+              userContent.push({ type: "image_url", image_url: { url: item.url } });
+          }
+      });
+    }
 
     // 3. Define JSON Schema for Recipe
     const recipeSchema = {
@@ -246,7 +272,7 @@ OUTPUT JSON format exactly as requested:
         }
         
         // Use the first media item as the thumbnail if not provided
-        if (finalMediaItems.length > 0) {
+        if (!isTextOnlyMode && finalMediaItems && finalMediaItems.length > 0) {
              recipeData.imageUrl = finalMediaItems[0].url; 
         }
         // Source URL
