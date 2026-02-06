@@ -34,9 +34,7 @@ Deno.serve(async (req) => {
         },
         body: JSON.stringify({
             prompt: `Delicious food photography, professional lighting, 8k, highly detailed: ${prompt}`,
-            size: "1024x1024", // Standard square for recipes
-            steps: 25, // Good balance of speed/quality
-            seed: -1
+            size: "1024*1024" // Format: "width*height" with asterisk
         })
     });
 
@@ -52,10 +50,10 @@ Deno.serve(async (req) => {
     // 4. Polling for Result
     let imageUrl = null;
     let attempts = 0;
-    const maxAttempts = 30; // 30 seconds max timeout
+    const maxAttempts = 60; // 60 seconds max timeout (image generation can take time)
 
     while (attempts < maxAttempts) {
-        await new Promise(r => setTimeout(r, 1000)); // Wait 1 sec
+        await new Promise(r => setTimeout(r, 2000)); // Wait 2 sec between checks
 
         const checkRes = await fetch(`https://api.novita.ai/v3/async/task-result?task_id=${taskId}`, {
             headers: {
@@ -65,15 +63,18 @@ Deno.serve(async (req) => {
 
         if (checkRes.ok) {
             const checkData = await checkRes.json();
+            console.log(`Attempt ${attempts + 1}: Status =`, checkData.task?.status);
             
-            if (checkData.status === 'SUCCEEDED') {
+            // Check task.status according to Novita API response structure
+            if (checkData.task?.status === 'TASK_STATUS_SUCCEED') {
                 if(checkData.images && checkData.images.length > 0) {
                      imageUrl = checkData.images[0].image_url;
                 }
                 break;
-            } else if (checkData.status === 'FAILED') {
-                throw new Error(`Image Generation Task Failed: ${checkData.reason || 'Unknown error'}`);
+            } else if (checkData.task?.status === 'TASK_STATUS_FAILED') {
+                throw new Error(`Image Generation Task Failed: ${checkData.task.reason || 'Unknown error'}`);
             }
+            // Continue polling if status is PROCESSING or QUEUED
         }
         attempts++;
     }

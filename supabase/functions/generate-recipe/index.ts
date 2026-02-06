@@ -6,9 +6,11 @@ console.log("Generate Recipe function initialized (AI Mode Only)")
 interface RecipeRequest {
   mediaItems?: { type: 'video' | 'image', url: string }[]
   userPreferences?: {
-    allergies: string[];
-    dietGoal: string;
-    equipment: string[];
+    foodAllergies: string[];
+    favoriteCuisines: string[];
+    tastePreferences: string[];
+    whatsInYourKitchen: string[];
+    otherTools: string[];
   }
   // Optional: Backwards compatibility or single URL pass-through
   videoUrl?: string
@@ -58,37 +60,42 @@ Deno.serve(async (req) => {
     if (!novitaApiKey) throw new Error('NOVITA_AI_API_KEY not configured');
 
     // 4. Fetch User Context from DB (Source of Truth)
-    let dbPreferences: any = {};
+    // Note: We prioritize userPreferences passed from client as it contains the most up-to-date Personalization data from MongoDB backend
     let dbPantry: any[] = [];
 
     const { data: { user } } = await supabase.auth.getUser();
     if (user) {
-        // Fetch Profile
-        const { data: profile } = await supabase.from('profiles').select('allergies, diet_goal, equipment').eq('id', user.id).single();
-        if (profile) dbPreferences = profile;
-
         // Fetch Pantry (Optional: Use ingredients from pantry)
         const { data: pantry } = await supabase.from('pantry_items').select('ingredient_name').eq('user_id', user.id);
         if (pantry) dbPantry = pantry; 
     }
 
-    // Merge: DB takes precedence over client-side if available
     const finalPreferences = {
-        allergies: dbPreferences.allergies || userPreferences?.allergies || [],
-        dietGoal: dbPreferences.diet_goal || userPreferences?.dietGoal || '',
-        equipment: dbPreferences.equipment || userPreferences?.equipment || []
+        foodAllergies: userPreferences?.foodAllergies || [],
+        favoriteCuisines: userPreferences?.favoriteCuisines || [],
+        tastePreferences: userPreferences?.tastePreferences || [],
+        whatsInYourKitchen: userPreferences?.whatsInYourKitchen || [],
+        otherTools: userPreferences?.otherTools || []
     };
 
     let prefsPrompt = "";
-    if (finalPreferences.allergies.length > 0) {
-        prefsPrompt += `\nCRITICAL: The user has ALLERGIES to: ${finalPreferences.allergies.join(', ')}. Do NOT include these ingredients. Suggest safe alternatives if necessary.`;
+    if (finalPreferences.foodAllergies.length > 0) {
+        prefsPrompt += `\nCRITICAL: The user has ALLERGIES to: ${finalPreferences.foodAllergies.join(', ')}. Do NOT include these ingredients. Suggest safe alternatives if necessary.`;
     }
-    if (finalPreferences.dietGoal) {
-        prefsPrompt += `\nUser's diet goal is: ${finalPreferences.dietGoal}. Adjust portions or ingredients to align with this (e.g. less oil, more protein).`;
+    
+    if (finalPreferences.tastePreferences.length > 0) {
+        prefsPrompt += `\nUser dislikes/avoids these flavors: ${finalPreferences.tastePreferences.join(', ')}.`;
     }
-    if (finalPreferences.equipment.length > 0) {
-        prefsPrompt += `\nUser has these tools: ${finalPreferences.equipment.join(', ')}. Tailor instructions to use these tools.`;
+
+    if (finalPreferences.favoriteCuisines.length > 0) {
+        prefsPrompt += `\nUser loves these cuisines: ${finalPreferences.favoriteCuisines.join(', ')}. Incorporate these styles if appropriate.`;
     }
+
+    const allTools = [...finalPreferences.whatsInYourKitchen, ...finalPreferences.otherTools];
+    if (allTools.length > 0) {
+        prefsPrompt += `\nUser has these tools: ${allTools.join(', ')}. Tailor instructions to use these tools.`;
+    }
+    
     if (dbPantry.length > 0) {
          const pantryNames = dbPantry.map((p: any) => p.ingredient_name).join(', ');
          prefsPrompt += `\nUser has these ingredients in PANTRY: ${pantryNames}. Try to use them if they fit the recipe.`;
