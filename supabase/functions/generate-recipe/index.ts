@@ -122,8 +122,6 @@ CRITICAL VALIDATION:
    {"error": "no_food_detected", "message": "This image/video does not appear to contain food or cooking content."}
 3. If content IS food-related, proceed with recipe generation.
 
-${prefsPrompt}
-
 OUTPUT JSON format exactly as requested:
 {
   "title": "", "description": "", "time_minutes": 0, "difficulty": "", 
@@ -203,7 +201,7 @@ OUTPUT JSON format exactly as requested:
       ],
       max_tokens: 2000,
       temperature: 0.2,
-      response_format: recipeSchema
+      response_format: recipeSchema // Enable strict schema to ensure valid JSON response
     };
 
 
